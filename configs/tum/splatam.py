@@ -36,7 +36,20 @@ config = dict(
     checkpoint_time_idx=0,
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
-    use_wandb=True,
+    use_wandb=False,
+    triplane=dict(
+        plane_size = 2500,
+        num_channels = 9,
+        mlp_dim = 168,
+        subplane_multiplier = 1,
+        # bound
+        xmin = -4.6,
+        xmax = 2.6,
+        ymin = -3.3,
+        ymax = 3.2,
+        zmin = -2.0,
+        zmax = 4.9,
+    ),
     wandb=dict(
         entity="theairlab",
         project="SplaTAM",
@@ -46,7 +59,7 @@ config = dict(
         eval_save_qual=True,
     ),
     data=dict(
-        basedir="./data/TUM_RGBD",
+        basedir="/disk2/wh/code/SplaTAM_wh/data/TUM_RGBD",
         gradslam_data_cfg=f"./configs/data/TUM/{scene_name}.yaml",
         sequence=f"rgbd_dataset_{scene_name}",
         desired_image_height=480,
@@ -79,6 +92,12 @@ config = dict(
             log_scales=0.0,
             cam_unnorm_rots=0.002,
             cam_trans=0.002,
+            plane1 = 0.0,
+            plane2 = 0.0,
+            plane3 = 0.0,
+            mlp1 = 0.0,
+            mlp2 = 0.0,
+            mlp3 = 0.0,
         ),
     ),
     mapping=dict(
@@ -97,12 +116,22 @@ config = dict(
         ),
         lrs=dict(
             means3D=0.0001,
-            rgb_colors=0.0025,
-            unnorm_rotations=0.001,
-            logit_opacities=0.05,
-            log_scales=0.001,
+            # rgb_colors=0.0025,
+            rgb_colors=0.0,
+            # unnorm_rotations=0.001,
+            unnorm_rotations=0.0,
+            # logit_opacities=0.05,
+            logit_opacities=0.0,
+            # log_scales=0.001,
+            log_scales=0.0,
             cam_unnorm_rots=0.0000,
             cam_trans=0.0000,
+            plane1 = 0.01,
+            plane2 = 0.001,
+            plane3 = 0.0001,
+            mlp1 = 1e-4,
+            mlp2 = 1e-5,
+            mlp3 = 1e-6,
         ),
         prune_gaussians=True, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations

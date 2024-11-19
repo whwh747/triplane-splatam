@@ -35,6 +35,8 @@ from utils.slam_helpers import (
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
+from scripts.triplane_model import GaussianLearner, Conctractor, inference_gs_nograd
+from scripts.triplane_model import inference_gs
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
@@ -157,9 +159,19 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
     return params, variables
 
 
-def initialize_optimizer(params, lrs_dict, tracking):
+def initialize_optimizer(params, our_model, lrs_dict, tracking):
     lrs = lrs_dict
     param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items()]
+    for i in range(3):
+        if i==0:
+            param_groups.append({'params': our_model._feat.k0s[i].parameters(), 'lr': lrs_dict['plane1'], 'name': 'feat_plane1'})
+            param_groups.append({'params': our_model._feat.models[i].parameters(), 'lr': lrs_dict['mlp1'], 'name': 'fp_mlp_f1'})
+        elif i==1:
+            param_groups.append({'params': our_model._feat.k0s[i].parameters(), 'lr': lrs_dict['plane2'], 'name': 'feat_plane2'})
+            param_groups.append({'params': our_model._feat.models[i].parameters(), 'lr': lrs_dict['mlp2'], 'name': 'fp_mlp_f2'})
+        else:
+            param_groups.append({'params': our_model._feat.k0s[i].parameters(), 'lr': lrs_dict['plane3'], 'name': 'feat_plane3'})
+            param_groups.append({'params': our_model._feat.models[i].parameters(), 'lr': lrs_dict['mlp3'], 'name': 'fp_mlp_f3'})
     if tracking:
         return torch.optim.Adam(param_groups)
     else:
@@ -211,7 +223,7 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
         return params, variables, intrinsics, w2c, cam
 
 
-def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
+def get_loss(params, params_net, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
              sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
              mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None):
     # Initialize Loss Dictionary
@@ -219,29 +231,29 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
 
     if tracking:
         # Get current frame Gaussians, where only the camera pose gets gradient
-        transformed_gaussians = transform_to_frame(params, iter_time_idx, 
+        transformed_gaussians = transform_to_frame(params, params_net, iter_time_idx, 
                                              gaussians_grad=False,
                                              camera_grad=True)
     elif mapping:
         if do_ba:
             # Get current frame Gaussians, where both camera pose and Gaussians get gradient
-            transformed_gaussians = transform_to_frame(params, iter_time_idx,
+            transformed_gaussians = transform_to_frame(params, params_net, iter_time_idx,
                                                  gaussians_grad=True,
                                                  camera_grad=True)
         else:
             # Get current frame Gaussians, where only the Gaussians get gradient
-            transformed_gaussians = transform_to_frame(params, iter_time_idx,
+            transformed_gaussians = transform_to_frame(params, params_net, iter_time_idx,
                                                  gaussians_grad=True,
                                                  camera_grad=False)
     else:
         # Get current frame Gaussians, where only the Gaussians get gradient
-        transformed_gaussians = transform_to_frame(params, iter_time_idx,
+        transformed_gaussians = transform_to_frame(params, params_net, iter_time_idx,
                                              gaussians_grad=True,
                                              camera_grad=False)
 
     # Initialize Render Variables
-    rendervar = transformed_params2rendervar(params, transformed_gaussians)
-    depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
+    rendervar = transformed_params2rendervar(params, params_net, transformed_gaussians)
+    depth_sil_rendervar = transformed_params2depthplussilhouette(params, params_net, curr_data['w2c'],
                                                                  transformed_gaussians)
 
     # RGB Rendering
@@ -375,11 +387,11 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
     return params
 
 
-def add_new_gaussians(params, variables, curr_data, sil_thres, 
+def add_new_gaussians(params, params_net, variables, curr_data, sil_thres, 
                       time_idx, mean_sq_dist_method, gaussian_distribution):
     # Silhouette Rendering
-    transformed_gaussians = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
-    depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
+    transformed_gaussians = transform_to_frame(params, params_net, time_idx, gaussians_grad=False, camera_grad=False)
+    depth_sil_rendervar = transformed_params2depthplussilhouette(params, params_net, curr_data['w2c'],
                                                                  transformed_gaussians)
     depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
     silhouette = depth_sil[1, :, :]
@@ -638,9 +650,23 @@ def rgbd_slam(config: dict):
                 keyframe_list.append(curr_keyframe)
     else:
         checkpoint_time_idx = 0
-    
+    #Init our model
+    tri_plane = GaussianLearner(config['triplane']).cuda()
+    contractor = Conctractor(xyz_min = torch.tensor([config['triplane']['xmin'], config['triplane']['ymin'], config['triplane']['zmin']]),
+                             xyz_max = torch.tensor([config['triplane']['xmax'], config['triplane']['ymax'], config['triplane']['zmax']]), enable = False).cuda()
+    # enalbe_net 表示使用三平面+mlp仅推理高斯函数的 opacity rgb scale rotation
+    # magic_k 表示仅使用隐式参数来渲染图像 计算损失
+    enable_net = True
+    magic_k = False
+    our_model = {
+        'tri_plane' : tri_plane,
+        'contractor' : contractor,
+        'enable_net' : enable_net,
+        'magic_k' : magic_k,
+    }
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
+        print('##########################time_idx = ', time_idx)
         # Load RGBD frames incrementally instead of all frames
         color, depth, _, gt_pose = dataset[time_idx]
         # Process poses
@@ -677,7 +703,7 @@ def rgbd_slam(config: dict):
         tracking_start_time = time.time()
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
             # Reset Optimizer & Learning Rates for tracking
-            optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True)
+            optimizer = initialize_optimizer(params, our_model['tri_plane'], config['tracking']['lrs'], tracking=True)
             # Keep Track of Best Candidate Rotation & Translation
             candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
             candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
@@ -687,10 +713,13 @@ def rgbd_slam(config: dict):
             do_continue_slam = False
             num_iters_tracking = config['tracking']['num_iters']
             progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
+            # inference guassian attribute once
+
+            params_net_tracking = inference_gs_nograd(our_model, params['means3D'])
             while True:
                 iter_start_time = time.time()
                 # Loss for current frame
-                loss, variables, losses = get_loss(params, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
+                loss, variables, losses = get_loss(params, params_net_tracking, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
@@ -712,10 +741,10 @@ def rgbd_slam(config: dict):
                     # Report Progress
                     if config['report_iter_progress']:
                         if config['use_wandb']:
-                            report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
+                            report_progress(params, params_net, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
                                             wandb_run=wandb_run, wandb_step=wandb_tracking_step, wandb_save_qual=config['wandb']['save_qual'])
                         else:
-                            report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
+                            report_progress(params, params_net, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
                     else:
                         progress_bar.update(1)
                 # Update the runtime numbers
@@ -763,10 +792,10 @@ def rgbd_slam(config: dict):
                 progress_bar = tqdm(range(1), desc=f"Tracking Result Time Step: {time_idx}")
                 with torch.no_grad():
                     if config['use_wandb']:
-                        report_progress(params, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
+                        report_progress(params, params_net, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
                                         wandb_run=wandb_run, wandb_step=wandb_time_step, wandb_save_qual=config['wandb']['save_qual'], global_logging=True)
                     else:
-                        report_progress(params, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
+                        report_progress(params, params_net_tracking, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
                 progress_bar.close()
             except:
                 ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
@@ -789,7 +818,8 @@ def rgbd_slam(config: dict):
                     densify_curr_data = curr_data
 
                 # Add new Gaussians to the scene based on the Silhouette
-                params, variables = add_new_gaussians(params, variables, densify_curr_data, 
+                params_net_densification = inference_gs(our_model, params['means3D'])
+                params, variables = add_new_gaussians(params, params_net_densification, variables, densify_curr_data, 
                                                       config['mapping']['sil_thres'], time_idx,
                                                       config['mean_sq_dist_method'], config['gaussian_distribution'])
                 post_num_pts = params['means3D'].shape[0]
@@ -819,7 +849,7 @@ def rgbd_slam(config: dict):
                 print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
             # Reset Optimizer & Learning Rates for Full Map Optimization
-            optimizer = initialize_optimizer(params, config['mapping']['lrs'], tracking=False) 
+            optimizer = initialize_optimizer(params, our_model['tri_plane'], config['mapping']['lrs'], tracking=False) 
 
             # Mapping
             mapping_start_time = time.time()
@@ -827,6 +857,8 @@ def rgbd_slam(config: dict):
                 progress_bar = tqdm(range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}")
             for iter in range(num_iters_mapping):
                 iter_start_time = time.time()
+                # inference gs attribute every iter
+                params_net_mapping = inference_gs(our_model, params['means3D'])
                 # Randomly select a frame until current time step amongst keyframes
                 rand_idx = np.random.randint(0, len(selected_keyframes))
                 selected_rand_keyframe_idx = selected_keyframes[rand_idx]
@@ -844,7 +876,7 @@ def rgbd_slam(config: dict):
                 iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
                              'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
                 # Loss for current frame
-                loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
+                loss, variables, losses = get_loss(params, params_net_mapping, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
                                                 config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
                                                 config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
                 if config['use_wandb']:
@@ -852,10 +884,12 @@ def rgbd_slam(config: dict):
                     wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
                 # Backprop
                 loss.backward()
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
                 with torch.no_grad():
                     # Prune Gaussians
                     if config['mapping']['prune_gaussians']:
-                        params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
+                        params, variables = prune_gaussians(params, params_net_mapping, variables, optimizer, iter, config['mapping']['pruning_dict'])
                         if config['use_wandb']:
                             wandb_run.log({"Mapping/Number of Gaussians - Pruning": params['means3D'].shape[0],
                                            "Mapping/step": wandb_mapping_step})
@@ -866,16 +900,15 @@ def rgbd_slam(config: dict):
                             wandb_run.log({"Mapping/Number of Gaussians - Densification": params['means3D'].shape[0],
                                            "Mapping/step": wandb_mapping_step})
                     # Optimizer Update
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
+                    
                     # Report Progress
                     if config['report_iter_progress']:
                         if config['use_wandb']:
-                            report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
+                            report_progress(params, params_net, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
                                             wandb_run=wandb_run, wandb_step=wandb_mapping_step, wandb_save_qual=config['wandb']['save_qual'],
                                             mapping=True, online_time_idx=time_idx)
                         else:
-                            report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
+                            report_progress(params, params_net, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
                                             mapping=True, online_time_idx=time_idx)
                     else:
                         progress_bar.update(1)
@@ -896,18 +929,18 @@ def rgbd_slam(config: dict):
                     progress_bar = tqdm(range(1), desc=f"Mapping Result Time Step: {time_idx}")
                     with torch.no_grad():
                         if config['use_wandb']:
-                            report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
+                            report_progress(params, params_net, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
                                             wandb_run=wandb_run, wandb_step=wandb_time_step, wandb_save_qual=config['wandb']['save_qual'],
                                             mapping=True, online_time_idx=time_idx, global_logging=True)
                         else:
-                            report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
+                            report_progress(params, params_net_mapping, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
                                             mapping=True, online_time_idx=time_idx)
                     progress_bar.close()
                 except:
                     ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
                     save_params_ckpt(params, ckpt_output_dir, time_idx)
                     print('Failed to evaluate trajectory.')
-        
+        print('mapping stop------')
         # Add frame to keyframe list
         if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
                     (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
@@ -959,6 +992,7 @@ def rgbd_slam(config: dict):
                        "Final Stats/step": 1})
     
     # Evaluate Final Parameters
+    params_net_eval = inference_gs(our_model, params['means3D'])
     with torch.no_grad():
         if config['use_wandb']:
             eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
@@ -966,7 +1000,7 @@ def rgbd_slam(config: dict):
                  mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
                  eval_every=config['eval_every'])
         else:
-            eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
+            eval(dataset, params, params_net_eval,  num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
                  mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
                  eval_every=config['eval_every'])
 

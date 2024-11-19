@@ -149,7 +149,7 @@ def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_
     plt.close()
 
 
-def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, every_i=1, qual_every_i=1, 
+def report_progress(params, params_net, data, i, progress_bar, iter_time_idx, sil_thres, every_i=1, qual_every_i=1, 
                     tracking=False, mapping=False, wandb_run=None, wandb_step=None, wandb_save_qual=False, online_time_idx=None,
                     global_logging=True):
     if i % every_i == 0 or i == 1:
@@ -208,13 +208,13 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
                                f"{stage}/ATE RMSE":ate_rmse}
 
         # Get current frame Gaussians
-        transformed_gaussians = transform_to_frame(params, iter_time_idx, 
+        transformed_gaussians = transform_to_frame(params, params_net, iter_time_idx, 
                                                    gaussians_grad=False,
                                                    camera_grad=False)
 
         # Initialize Render Variables
-        rendervar = transformed_params2rendervar(params, transformed_gaussians)
-        depth_sil_rendervar = transformed_params2depthplussilhouette(params, data['w2c'], 
+        rendervar = transformed_params2rendervar(params, params_net, transformed_gaussians)
+        depth_sil_rendervar = transformed_params2depthplussilhouette(params, params_net, data['w2c'], 
                                                                      transformed_gaussians)
         depth_sil, _, _, = Renderer(raster_settings=data['cam'])(**depth_sil_rendervar)
         rastered_depth = depth_sil[0, :, :].unsqueeze(0)
@@ -405,7 +405,7 @@ def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
     plt.close()
 
 
-def eval(dataset, final_params, num_frames, eval_dir, sil_thres, 
+def eval(dataset, final_params, params_net, num_frames, eval_dir, sil_thres, 
          mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False):
     print("Evaluating Final Parameters ...")
     psnr_list = []
@@ -448,7 +448,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
             continue
 
         # Get current frame Gaussians
-        transformed_gaussians = transform_to_frame(final_params, time_idx, 
+        transformed_gaussians = transform_to_frame(final_params, params_net, time_idx, 
                                                    gaussians_grad=False, 
                                                    camera_grad=False)
  
@@ -456,8 +456,8 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
 
         # Initialize Render Variables
-        rendervar = transformed_params2rendervar(final_params, transformed_gaussians)
-        depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
+        rendervar = transformed_params2rendervar(final_params, params_net, transformed_gaussians)
+        depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, params_net, curr_data['w2c'],
                                                                      transformed_gaussians)
 
         # Render Depth & Silhouette
