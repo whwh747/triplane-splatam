@@ -176,7 +176,7 @@ def prune_gaussians(params, params_net, variables, optimizer, iter, prune_dict):
             to_remove = (torch.sigmoid(params_net['logit_opacities']) < remove_threshold).squeeze()
             # Remove Gaussians that are too big
             if iter >= prune_dict['remove_big_after']:
-                big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
+                big_points_ws = torch.exp(params_net['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
                 to_remove = torch.logical_or(to_remove, big_points_ws)
             params, variables = remove_points(to_remove, params, variables, optimizer)
             torch.cuda.empty_cache()

@@ -666,7 +666,6 @@ def rgbd_slam(config: dict):
     }
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
-        print('##########################time_idx = ', time_idx)
         # Load RGBD frames incrementally instead of all frames
         color, depth, _, gt_pose = dataset[time_idx]
         # Process poses
@@ -940,7 +939,6 @@ def rgbd_slam(config: dict):
                     ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
                     save_params_ckpt(params, ckpt_output_dir, time_idx)
                     print('Failed to evaluate trajectory.')
-        print('mapping stop------')
         # Add frame to keyframe list
         if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
                     (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
