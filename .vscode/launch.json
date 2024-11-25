@@ -10,7 +10,7 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "args": ["configs/tum/splatam.py"],
+            "args": ["/disk2/wh/code/SplaTAM_tri_plane/configs/tum/splatam.py"],
             "justMyCode": false,
         }
     ]

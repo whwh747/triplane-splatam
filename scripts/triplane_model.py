@@ -283,12 +283,12 @@ class Conctractor(nn.Module):
     
 def inference_gs(model, points):
     if model['enable_net']:
-        opacity_net, scales_net, rgb_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points.detach()))
+        opacity_net, scales_net, rgb_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points))
         scales_net = (scales_net-1)*5-2
         scales_net = scales_net.mean(dim=1 , keepdim=True)
         rgb_net = F.normalize(rgb_net, dim=1)
         params_net = {
-        'means3D': points.detach(),
+        'means3D': points,
         'rgb_colors': rgb_net,
         'unnorm_rotations': rotations_net,
         'logit_opacities': opacity_net,

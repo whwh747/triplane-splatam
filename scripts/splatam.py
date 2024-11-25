@@ -175,6 +175,7 @@ def initialize_optimizer(params, our_model, lrs_dict, tracking):
     if tracking:
         return torch.optim.Adam(param_groups)
     else:
+        # 即使优化器的学习率为0，也会更新参数，因为params_groups中的参数的学习率不为0
         return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
 
@@ -655,8 +656,8 @@ def rgbd_slam(config: dict):
     contractor = Conctractor(xyz_min = torch.tensor([config['triplane']['xmin'], config['triplane']['ymin'], config['triplane']['zmin']]),
                              xyz_max = torch.tensor([config['triplane']['xmax'], config['triplane']['ymax'], config['triplane']['zmax']]), enable = False).cuda()
     # enalbe_net 表示使用三平面+mlp仅推理高斯函数的 opacity rgb scale rotation
-    # magic_k 表示仅使用隐式参数来渲染图像 计算损失
-    enable_net = True
+    # magic_k 表示仅使用隐式参数来渲染图像  计算损失
+    enable_net = False
     magic_k = False
     our_model = {
         'tri_plane' : tri_plane,
@@ -699,6 +700,7 @@ def rgbd_slam(config: dict):
             params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
 
         # Tracking
+        # now, we use gt poses for tracking!!!
         tracking_start_time = time.time()
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
             # Reset Optimizer & Learning Rates for tracking
@@ -903,11 +905,11 @@ def rgbd_slam(config: dict):
                     # Report Progress
                     if config['report_iter_progress']:
                         if config['use_wandb']:
-                            report_progress(params, params_net, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
+                            report_progress(params, params_net_mapping, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
                                             wandb_run=wandb_run, wandb_step=wandb_mapping_step, wandb_save_qual=config['wandb']['save_qual'],
                                             mapping=True, online_time_idx=time_idx)
                         else:
-                            report_progress(params, params_net, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
+                            report_progress(params, params_net_mapping, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
                                             mapping=True, online_time_idx=time_idx)
                     else:
                         progress_bar.update(1)
