@@ -657,13 +657,15 @@ def rgbd_slam(config: dict):
                              xyz_max = torch.tensor([config['triplane']['xmax'], config['triplane']['ymax'], config['triplane']['zmax']]), enable = False).cuda()
     # enalbe_net 表示使用三平面+mlp仅推理高斯函数的 opacity rgb scale rotation
     # magic_k 表示仅使用隐式参数来渲染图像  计算损失
-    enable_net = False
+    enable_net = True
     magic_k = False
+    max_sh_degree = 2
     our_model = {
         'tri_plane' : tri_plane,
         'contractor' : contractor,
         'enable_net' : enable_net,
         'magic_k' : magic_k,
+        'max_sh_degree' : max_sh_degree,
     }
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):

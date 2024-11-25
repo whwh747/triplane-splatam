@@ -130,7 +130,7 @@ def transformed_params2rendervar(params, params_net, transformed_gaussians):
         # Initialize Render Variables
         rendervar = {
             'means3D': transformed_gaussians['means3D'],
-            'colors_precomp': params_net['rgb_colors'],
+            'shs': params_net['shs'],
             'rotations': F.normalize(transformed_gaussians['unnorm_rotations']),
             'opacities': torch.sigmoid(params_net['logit_opacities']),
             'scales': torch.exp(log_scales),

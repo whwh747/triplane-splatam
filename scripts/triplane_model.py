@@ -16,7 +16,7 @@ class GaussianLearner(nn.Module):
         self.current_step = 0
 
         self._feat = FeaturePlanes(world_size=self.world_size, xyz_min = self.xyz_min, xyz_max= self.xyz_max,
-                                    feat_dim = model_params['num_channels'], mlp_width = [model_params['mlp_dim']], out_dim=[11], subplane_multiplier=model_params['subplane_multiplier'] )  # 27,4,3,1
+                                    feat_dim = model_params['num_channels'], mlp_width = [model_params['mlp_dim']], out_dim=[35], subplane_multiplier=model_params['subplane_multiplier'] )  # 27,4,3,1
 
         self.register_buffer('opacity_scale', torch.tensor(10))
         self.opacity_scale = self.opacity_scale.cuda()
@@ -33,10 +33,15 @@ class GaussianLearner(nn.Module):
         inputs = xyz.cuda().detach()
         
         tmp  = self._feat(inputs, self.Q0)
-        features = tmp[:,:3]
-        rotations = tmp[:,3:3+4]
-        scale = tmp[:,7:7+3]
-        opacity = tmp[:,10:]
+        # features = tmp[:,:3]
+        # rotations = tmp[:,3:3+4]
+        # scale = tmp[:,7:7+3]
+        # opacity = tmp[:,10:]
+        # scale = torch.sigmoid(scale)
+        features = tmp[:,:27]
+        rotations = tmp[:,27:27+4]
+        scale = tmp[:,31:31+3]
+        opacity = tmp[:,34:]
         scale = torch.sigmoid(scale)
 
         return opacity*10, scale, features, rotations
@@ -286,10 +291,13 @@ def inference_gs(model, points):
         opacity_net, scales_net, rgb_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points))
         scales_net = (scales_net-1)*5-2
         scales_net = scales_net.mean(dim=1 , keepdim=True)
-        rgb_net = F.normalize(rgb_net, dim=1)
+        # rgb_net = F.normalize(rgb_net, dim=1)
+        rgb_net = rgb_net.view(rgb_net.size(0), (model['max_sh_degree'] + 1) ** 2, 3)
+        feature_dc = rgb_net[:,0:1,:]
+        feature_rest = rgb_net[:,1:,:]
         params_net = {
         'means3D': points,
-        'rgb_colors': rgb_net,
+        'shs': torch.cat([feature_dc, feature_rest], dim=1),
         'unnorm_rotations': rotations_net,
         'logit_opacities': opacity_net,
         'log_scales': scales_net,
