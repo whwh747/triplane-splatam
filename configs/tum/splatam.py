@@ -31,7 +31,7 @@ config = dict(
     scene_radius_depth_ratio=scene_radius_depth_ratio, # Max First Frame Depth to Scene Radius Ratio (For Pruning/Densification)
     mean_sq_dist_method="projective", # ["projective", "knn"] (Type of Mean Squared Distance Calculation for Scale of Gaussians)
     gaussian_distribution="isotropic", # ["isotropic", "anisotropic"] (Isotropic -> Spherical Covariance, Anisotropic -> Ellipsoidal Covariance)
-    report_iter_progress=True,
+    report_iter_progress=False,
     load_checkpoint=False,
     checkpoint_time_idx=0,
     save_checkpoints=False, # Save Checkpoints
@@ -83,6 +83,7 @@ config = dict(
         loss_weights=dict(
             im=0.5,
             depth=1.0,
+            sparsity=0.0,
         ),
         lrs=dict(
             means3D=0.0,
@@ -113,6 +114,7 @@ config = dict(
         loss_weights=dict(
             im=0.5,
             depth=1.0,
+            sparsity=1e-3,
         ),
         lrs=dict(
             means3D=0.0001,

@@ -295,9 +295,16 @@ def inference_gs(model, points):
         rgb_net = rgb_net.view(rgb_net.size(0), (model['max_sh_degree'] + 1) ** 2, 3)
         feature_dc = rgb_net[:,0:1,:]
         feature_rest = rgb_net[:,1:,:]
+        if model['use_mlp_color']:
+            xyz = contract_to_unisphere(points.clone().detach(), torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device='cuda'))
+            dir_pp = (points - model['cam'].campos.repeat(points.shape[0], 1))
+            dir_pp = dir_pp / dir_pp.norm(dim=1, keepdim=True)
+            shs = model['mlp_head'](torch.cat([model['recolor'](xyz), model['direction_encoding'](dir_pp)], dim=-1)).unsqueeze(1)
+        else:
+            shs = torch.cat((feature_dc, feature_rest), dim=1)
         params_net = {
         'means3D': points,
-        'shs': torch.cat([feature_dc, feature_rest], dim=1),
+        'shs': shs.float(),
         'unnorm_rotations': rotations_net,
         'logit_opacities': opacity_net,
         'log_scales': scales_net,
@@ -308,16 +315,50 @@ def inference_gs(model, points):
 @torch.no_grad()
 def inference_gs_nograd(model, points):
     if model['enable_net']:
-        opacity_net, scales_net, rgb_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points.detach()))
+        opacity_net, scales_net, rgb_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points))
         scales_net = (scales_net-1)*5-2
         scales_net = scales_net.mean(dim=1 , keepdim=True)
-        rgb_net = F.normalize(rgb_net, dim=1)
+        # rgb_net = F.normalize(rgb_net, dim=1)
+        rgb_net = rgb_net.view(rgb_net.size(0), (model['max_sh_degree'] + 1) ** 2, 3)
+        feature_dc = rgb_net[:,0:1,:]
+        feature_rest = rgb_net[:,1:,:]
+        if model['use_mlp_color']:
+            xyz = contract_to_unisphere(points.clone().detach(), torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device='cuda'))
+            dir_pp = (points - model['cam'].campos.repeat(points.shape[0], 1))
+            dir_pp = dir_pp / dir_pp.norm(dim=1, keepdim=True)
+            shs = model['mlp_head'](torch.cat([model['recolor'](xyz), model['direction_encoding'](dir_pp)], dim=-1)).unsqueeze(1)
+        else:
+            shs = torch.cat((feature_dc, feature_rest), dim=1)
         params_net = {
-        'means3D': points.detach(),
-        'rgb_colors': rgb_net,
+        'means3D': points,
+        'shs': shs.float(),
         'unnorm_rotations': rotations_net,
         'logit_opacities': opacity_net,
         'log_scales': scales_net,
         }
         return params_net
     return {}
+def contract_to_unisphere(
+        x: torch.Tensor,
+        aabb: torch.Tensor,
+        ord: int = 2,
+        eps: float = 1e-6,
+        derivative: bool = False,
+    ):
+        aabb_min, aabb_max = torch.split(aabb, 3, dim=-1)
+        x = (x - aabb_min) / (aabb_max - aabb_min)
+        x = x * 2 - 1  # aabb is at [-1, 1]
+        mag = torch.linalg.norm(x, ord=ord, dim=-1, keepdim=True)
+        mask = mag.squeeze(-1) > 1
+
+        if derivative:
+            dev = (2 * mag - 1) / mag**2 + 2 * x**2 * (
+                1 / mag**3 - (2 * mag - 1) / mag**4
+            )
+            dev[~mask] = 1.0
+            dev = torch.clamp(dev, min=eps)
+            return dev
+        else:
+            x[mask] = (2 - 1 / mag[mask]) * (x[mask] / mag[mask])
+            x = x / 4 + 0.5  # [-inf, inf] is at [0, 1]
+            return x

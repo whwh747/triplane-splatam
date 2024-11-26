@@ -37,6 +37,7 @@ from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, dens
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 from scripts.triplane_model import GaussianLearner, Conctractor, inference_gs_nograd
 from scripts.triplane_model import inference_gs
+import tinycudann as tcnn
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
@@ -162,16 +163,20 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
 def initialize_optimizer(params, our_model, lrs_dict, tracking):
     lrs = lrs_dict
     param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items()]
+    for params in our_model['recolor'].parameters():
+        param_groups.append({'params': params, 'lr': 0.01, 'name': 'recolor'})
+    for params in our_model['mlp_head'].parameters():
+        param_groups.append({'params': params, 'lr': 0.01, 'name': 'mlp_head'})
     for i in range(3):
         if i==0:
-            param_groups.append({'params': our_model._feat.k0s[i].parameters(), 'lr': lrs_dict['plane1'], 'name': 'feat_plane1'})
-            param_groups.append({'params': our_model._feat.models[i].parameters(), 'lr': lrs_dict['mlp1'], 'name': 'fp_mlp_f1'})
+            param_groups.append({'params': our_model['tri_plane']._feat.k0s[i].parameters(), 'lr': lrs_dict['plane1'], 'name': 'feat_plane1'})
+            param_groups.append({'params': our_model['tri_plane']._feat.models[i].parameters(), 'lr': lrs_dict['mlp1'], 'name': 'fp_mlp_f1'})
         elif i==1:
-            param_groups.append({'params': our_model._feat.k0s[i].parameters(), 'lr': lrs_dict['plane2'], 'name': 'feat_plane2'})
-            param_groups.append({'params': our_model._feat.models[i].parameters(), 'lr': lrs_dict['mlp2'], 'name': 'fp_mlp_f2'})
+            param_groups.append({'params': our_model['tri_plane']._feat.k0s[i].parameters(), 'lr': lrs_dict['plane2'], 'name': 'feat_plane2'})
+            param_groups.append({'params': our_model['tri_plane']._feat.models[i].parameters(), 'lr': lrs_dict['mlp2'], 'name': 'fp_mlp_f2'})
         else:
-            param_groups.append({'params': our_model._feat.k0s[i].parameters(), 'lr': lrs_dict['plane3'], 'name': 'feat_plane3'})
-            param_groups.append({'params': our_model._feat.models[i].parameters(), 'lr': lrs_dict['mlp3'], 'name': 'fp_mlp_f3'})
+            param_groups.append({'params': our_model['tri_plane']._feat.k0s[i].parameters(), 'lr': lrs_dict['plane3'], 'name': 'feat_plane3'})
+            param_groups.append({'params': our_model['tri_plane']._feat.models[i].parameters(), 'lr': lrs_dict['mlp3'], 'name': 'fp_mlp_f3'})
     if tracking:
         return torch.optim.Adam(param_groups)
     else:
@@ -224,7 +229,7 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
         return params, variables, intrinsics, w2c, cam
 
 
-def get_loss(params, params_net, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
+def get_loss(our_model, params, params_net, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
              sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
              mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None):
     # Initialize Loss Dictionary
@@ -349,6 +354,13 @@ def get_loss(params, params_net, curr_data, variables, iter_time_idx, loss_weigh
         # plt.savefig(os.path.join(save_plot_dir, f"%04d.png" % tracking_iteration), bbox_inches='tight')
         # plt.close()
 
+    # add sparsity loss
+    if tracking:
+        sparsity_loss = torch.tensor(0.0, device="cuda")
+    else:
+        sparsity_loss = our_model['tri_plane'].calc_sparsity()
+    if our_model['use_spatial']:
+        losses['sparsity'] = sparsity_loss
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(weighted_losses.values())
 
@@ -400,6 +412,17 @@ def add_new_gaussians(params, params_net, variables, curr_data, sil_thres,
     # Check for new foreground objects by using GT depth
     gt_depth = curr_data['depth'][0, :, :]
     render_depth = depth_sil[0, :, :]
+    # downsample silhouette, render depth, gt_depth and image
+    # downsample_sil = torch.nn.functional.interpolate(silhouette.unsqueeze(0).unsqueeze(0), size=(silhouette.shape[0]//2, silhouette.shape[1]//2), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
+    # downsample_render_depth = torch.nn.functional.interpolate(render_depth.unsqueeze(0).unsqueeze(0), size=(render_depth.shape[0]//2, render_depth.shape[1]//2), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
+    # downsample_gt_depth = torch.nn.functional.interpolate(gt_depth.unsqueeze(0).unsqueeze(0), size=(gt_depth.shape[0]//2, gt_depth.shape[1]//2), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
+    # downsample_im = torch.nn.functional.interpolate(curr_data['im'].unsqueeze(0), size=(curr_data['im'].shape[1]//2, curr_data['im'].shape[2]//2), mode='bilinear', align_corners=False).squeeze(0)
+    # depth_error_new = torch.abs(downsample_gt_depth - downsample_render_depth) * (downsample_gt_depth > 0)
+    # mask1 = (downsample_render_depth > downsample_gt_depth) * (depth_error_new > 50*depth_error_new.median())
+    # mask2 = (downsample_sil < sil_thres)
+    # mask = mask1 | mask2
+    # mask = mask.reshape(-1)
+    # vanid_depth_mask_downsample = (downsample_gt_depth > 0)
     depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
     non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 50*depth_error.median())
     # Determine non-presence mask
@@ -478,6 +501,7 @@ def rgbd_slam(config: dict):
     print(f"{config}")
 
     # Create Output Directories
+    # todo 1. 创建新的输出目录
     output_dir = os.path.join(config["workdir"], config["run_name"])
     eval_dir = os.path.join(output_dir, "eval")
     os.makedirs(eval_dir, exist_ok=True)
@@ -660,13 +684,55 @@ def rgbd_slam(config: dict):
     enable_net = True
     magic_k = False
     max_sh_degree = 2
+    recolor = tcnn.Encoding(
+        n_input_dims=3,
+        encoding_config={
+            "otype": "HashGrid",
+            "n_levels": 16,
+            "n_features_per_level": 2,
+            "log2_hashmap_size": 19,
+            "base_resolution": 16,
+            "per_level_scale": 1.447,
+        },
+    )
+    direction_encoding = tcnn.Encoding(
+        n_input_dims=3,
+        encoding_config={
+            "otype": "SphericalHarmonics",
+            "degree": 3 
+        },
+    )
+    mlp_head = tcnn.Network(
+        n_input_dims=(direction_encoding.n_output_dims+recolor.n_output_dims),
+        n_output_dims=3,
+        network_config={
+                    "otype": "FullyFusedMLP",
+                    "activation": "ReLU",
+                    "output_activation": "None",
+                    "n_neurons": 64,
+                    "n_hidden_layers": 2,
+                },
+    )
     our_model = {
-        'tri_plane' : tri_plane,
-        'contractor' : contractor,
-        'enable_net' : enable_net,
-        'magic_k' : magic_k,
-        'max_sh_degree' : max_sh_degree,
+        'cam': cam, # 一些相机的参数
+        'tri_plane' : tri_plane, # 三平面模型
+        'contractor' : contractor, # 将点压缩到三平面的模型 这个模型不需要优化
+        'enable_net' : enable_net, # 是否使用三平面+mlp来推理高斯函数的 opacity shs scale rotation
+        'magic_k' : magic_k, # 暂时未使用 （显式与隐式协同优化时使用）
+        'max_sh_degree' : max_sh_degree, # 最大的球谐函数的阶数
+        'recolor' : recolor, # 用于编码颜色的模型
+        'direction_encoding' : direction_encoding, # 用于编码方向的模型
+        'mlp_head' : mlp_head, # 用于推理颜色的模型
+        'use_mlp_color' : True, # True means use mlp_head to inference color, False means use tri_plane to inference color
+        'use_spatial' : False, # True means use spatial loss, False means not use spatial loss
     }
+
+    # Notice:
+    # 1. if enable_net is True and use_mlp_color is True, then tri_plane will only inference opacity, scale, rotation,
+    #    and mlp_head will inference shs
+    # 2. if enable_net is True and use_mlp_color is False, then tri_plane will inference opacity, scale, rotation, and shs
+    # 3. if enable_net is Fasle, then we same as the original SplaTAM
+
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
         # Load RGBD frames incrementally instead of all frames
@@ -706,7 +772,7 @@ def rgbd_slam(config: dict):
         tracking_start_time = time.time()
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
             # Reset Optimizer & Learning Rates for tracking
-            optimizer = initialize_optimizer(params, our_model['tri_plane'], config['tracking']['lrs'], tracking=True)
+            optimizer = initialize_optimizer(params, our_model, config['tracking']['lrs'], tracking=True)
             # Keep Track of Best Candidate Rotation & Translation
             candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
             candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
@@ -722,7 +788,7 @@ def rgbd_slam(config: dict):
             while True:
                 iter_start_time = time.time()
                 # Loss for current frame
-                loss, variables, losses = get_loss(params, params_net_tracking, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
+                loss, variables, losses = get_loss(our_model, params, params_net_tracking, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
@@ -747,7 +813,7 @@ def rgbd_slam(config: dict):
                             report_progress(params, params_net, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
                                             wandb_run=wandb_run, wandb_step=wandb_tracking_step, wandb_save_qual=config['wandb']['save_qual'])
                         else:
-                            report_progress(params, params_net, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
+                            report_progress(params, params_net_tracking, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
                     else:
                         progress_bar.update(1)
                 # Update the runtime numbers
@@ -852,7 +918,7 @@ def rgbd_slam(config: dict):
                 print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
             # Reset Optimizer & Learning Rates for Full Map Optimization
-            optimizer = initialize_optimizer(params, our_model['tri_plane'], config['mapping']['lrs'], tracking=False) 
+            optimizer = initialize_optimizer(params, our_model, config['mapping']['lrs'], tracking=False) 
 
             # Mapping
             mapping_start_time = time.time()
@@ -879,7 +945,7 @@ def rgbd_slam(config: dict):
                 iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
                              'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
                 # Loss for current frame
-                loss, variables, losses = get_loss(params, params_net_mapping, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
+                loss, variables, losses = get_loss(our_model, params, params_net_mapping, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
                                                 config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
                                                 config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
                 if config['use_wandb']:
