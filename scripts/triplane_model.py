@@ -80,10 +80,13 @@ class FeaturePlanes(nn.Module):
         # k0s中存储3个三平面
         self.k0s =  torch.nn.ModuleList()
 
-        for i in range(self.num_levels):
-            cur_ws = (t_ws*self.level_factor**(self.num_levels-i-1)).cpu().int().numpy().tolist()
-            self.k0s.append(PlaneGrid(feat_dim, cur_ws, xyz_min, xyz_max,config={'factor':1}))
-            print('Create Planes @ ', cur_ws)
+        plane_res = [0.24, 0.12, 0.06]
+        xyz_len = xyz_max - xyz_min
+        for grid_res in plane_res:
+            grid_shape = list(map(int, (xyz_len / grid_res).tolist()))
+            grid_shape[0], grid_shape[2] = grid_shape[2], grid_shape[0]
+            self.k0s.append(PlaneGrid(feat_dim, grid_shape, xyz_min, xyz_max,config={'factor':1}))
+            print('Grid Shape:', grid_shape)
 
         # 存储MLP网络
         self.models = torch.nn.ModuleList()
@@ -292,15 +295,15 @@ def inference_gs(model, points):
         scales_net = (scales_net-1)*5-2
         scales_net = scales_net.mean(dim=1 , keepdim=True)
         # rgb_net = F.normalize(rgb_net, dim=1)
-        rgb_net = rgb_net.view(rgb_net.size(0), (model['max_sh_degree'] + 1) ** 2, 3)
-        feature_dc = rgb_net[:,0:1,:]
-        feature_rest = rgb_net[:,1:,:]
         if model['use_mlp_color']:
             xyz = contract_to_unisphere(points.clone().detach(), torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device='cuda'))
             dir_pp = (points - model['cam'].campos.repeat(points.shape[0], 1))
             dir_pp = dir_pp / dir_pp.norm(dim=1, keepdim=True)
             shs = model['mlp_head'](torch.cat([model['recolor'](xyz), model['direction_encoding'](dir_pp)], dim=-1)).unsqueeze(1)
         else:
+            rgb_net = rgb_net.view(rgb_net.size(0), (model['max_sh_degree'] + 1) ** 2, 3)
+            feature_dc = rgb_net[:,0:1,:]
+            feature_rest = rgb_net[:,1:,:]
             shs = torch.cat((feature_dc, feature_rest), dim=1)
         params_net = {
         'means3D': points,

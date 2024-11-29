@@ -9,9 +9,9 @@ _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.path.insert(0, _BASE_DIR)
 
-print("System Paths:")
-for p in sys.path:
-    print(p)
+# print("System Paths:")
+# for p in sys.path:
+#     print(p)
 
 import cv2
 import matplotlib.pyplot as plt
@@ -490,7 +490,7 @@ def convert_params_to_store(params):
 
 def rgbd_slam(config: dict):
     # Print Config
-    print("Loaded Config:")
+    # print("Loaded Config:")
     if "use_depth_loss_thres" not in config['tracking']:
         config['tracking']['use_depth_loss_thres'] = False
         config['tracking']['depth_loss_thres'] = 100000
@@ -498,11 +498,13 @@ def rgbd_slam(config: dict):
         config['tracking']['visualize_tracking_loss'] = False
     if "gaussian_distribution" not in config:
         config['gaussian_distribution'] = "isotropic"
-    print(f"{config}")
+    # print(f"{config}")
 
     # Create Output Directories
-    # todo 1. 创建新的输出目录
-    output_dir = os.path.join(config["workdir"], config["run_name"])
+    # Create a new output directory with a timestamp to avoid overwriting
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    output_dir = os.path.join(config["workdir"], f"{config['run_name']}_{timestamp}")
+    # output_dir = os.path.join(config["workdir"], config["run_name"])
     eval_dir = os.path.join(output_dir, "eval")
     os.makedirs(eval_dir, exist_ok=True)
     
@@ -868,7 +870,7 @@ def rgbd_slam(config: dict):
                 progress_bar.close()
             except:
                 ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-                save_params_ckpt(params, ckpt_output_dir, time_idx)
+                # save_params_ckpt(params, ckpt_output_dir, time_idx)
                 print('Failed to evaluate trajectory.')
 
         # Densification & KeyFrame-based Mapping
@@ -1007,7 +1009,7 @@ def rgbd_slam(config: dict):
                     progress_bar.close()
                 except:
                     ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-                    save_params_ckpt(params, ckpt_output_dir, time_idx)
+                    # save_params_ckpt(params, ckpt_output_dir, time_idx)
                     print('Failed to evaluate trajectory.')
         # Add frame to keyframe list
         if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
@@ -1028,7 +1030,7 @@ def rgbd_slam(config: dict):
         # Checkpoint every iteration
         if time_idx % config["checkpoint_interval"] == 0 and config['save_checkpoints']:
             ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-            save_params_ckpt(params, ckpt_output_dir, time_idx)
+            # save_params_ckpt(params, ckpt_output_dir, time_idx)
             np.save(os.path.join(ckpt_output_dir, f"keyframe_time_indices{time_idx}.npy"), np.array(keyframe_time_indices))
         
         # Increment WandB Time Step
@@ -1073,19 +1075,40 @@ def rgbd_slam(config: dict):
                  eval_every=config['eval_every'])
 
     # Add Camera Parameters to Save them
-    params['timestep'] = variables['timestep']
-    params['intrinsics'] = intrinsics.detach().cpu().numpy()
-    params['w2c'] = first_frame_w2c.detach().cpu().numpy()
-    params['org_width'] = dataset_config["desired_image_width"]
-    params['org_height'] = dataset_config["desired_image_height"]
-    params['gt_w2c_all_frames'] = []
-    for gt_w2c_tensor in gt_w2c_all_frames:
-        params['gt_w2c_all_frames'].append(gt_w2c_tensor.detach().cpu().numpy())
-    params['gt_w2c_all_frames'] = np.stack(params['gt_w2c_all_frames'], axis=0)
-    params['keyframe_time_indices'] = np.array(keyframe_time_indices)
+    # params['timestep'] = variables['timestep']
+    # params['intrinsics'] = intrinsics.detach().cpu().numpy()
+    # params['w2c'] = first_frame_w2c.detach().cpu().numpy()
+    # params['org_width'] = dataset_config["desired_image_width"]
+    # params['org_height'] = dataset_config["desired_image_height"]
+    # params['gt_w2c_all_frames'] = []
+    # for gt_w2c_tensor in gt_w2c_all_frames:
+    #     params['gt_w2c_all_frames'].append(gt_w2c_tensor.detach().cpu().numpy())
+    # params['gt_w2c_all_frames'] = np.stack(params['gt_w2c_all_frames'], axis=0)
+    # params['keyframe_time_indices'] = np.array(keyframe_time_indices)
     
     # Save Parameters
-    save_params(params, output_dir)
+    # We only want to save gs attribute and our model(selected).
+    if our_model['enable_net']:
+        # params_net_save = inference_gs_nograd(our_model, params['means3D'])
+        # save params_net_save, tri_plane, contractor, recolor, direction_encoding, mlp_head
+        # torch.save({
+        #     'means3D': params['means3D'],
+        #     'tri_plane': our_model['tri_plane'].state_dict(),
+        #     'contractor': our_model['contractor'].state_dict(),
+        #     'recolor': our_model['recolor'].state_dict(),
+        #     'direction_encoding': our_model['direction_encoding'].state_dict(),
+        #     'mlp_head': our_model['mlp_head'].state_dict()
+        # }, os.path.join(output_dir, 'params_net.pth'))
+        torch.save(params['means3D'], os.path.join(output_dir, 'means3D.pth'))
+        torch.save(our_model['tri_plane'].state_dict(), os.path.join(output_dir, 'tri_plane.pth'))
+        torch.save(our_model['contractor'].state_dict(), os.path.join(output_dir, 'contractor.pth'))
+        torch.save(our_model['recolor'].state_dict(), os.path.join(output_dir, 'recolor.pth'))
+        torch.save(our_model['direction_encoding'].state_dict(), os.path.join(output_dir, 'direction_encoding.pth'))
+        torch.save(our_model['mlp_head'].state_dict(), os.path.join(output_dir, 'mlp_head.pth'))
+    else:
+        # save params
+        torch.save(params, os.path.join(output_dir, 'params.pth'))
+    # save_params(params, output_dir)
 
     # Close WandB Run
     if config['use_wandb']:
@@ -1109,8 +1132,8 @@ if __name__ == "__main__":
     results_dir = os.path.join(
         experiment.config["workdir"], experiment.config["run_name"]
     )
-    if not experiment.config['load_checkpoint']:
-        os.makedirs(results_dir, exist_ok=True)
-        shutil.copy(args.experiment, os.path.join(results_dir, "config.py"))
+    # if not experiment.config['load_checkpoint']:
+    #     os.makedirs(results_dir, exist_ok=True)
+    #     shutil.copy(args.experiment, os.path.join(results_dir, "config.py"))
 
     rgbd_slam(experiment.config)
