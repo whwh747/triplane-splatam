@@ -15,7 +15,7 @@ class GaussianLearner(nn.Module):
         self.max_step = 6
         self.current_step = 0
 
-        self._feat = FeaturePlanes(world_size=self.world_size, xyz_min = self.xyz_min, xyz_max= self.xyz_max,
+        self._feat = FeaturePlanes(use_single_mlp = model_params['use_single_mlp'], world_size=self.world_size, xyz_min = self.xyz_min, xyz_max= self.xyz_max,
                                     feat_dim = model_params['num_channels'], mlp_width = [model_params['mlp_dim']], out_dim=[35], subplane_multiplier=model_params['subplane_multiplier'] )  # 27,4,3,1
 
         self.register_buffer('opacity_scale', torch.tensor(10))
@@ -67,7 +67,7 @@ class GaussianLearner(nn.Module):
         return res / ((self._feat.activate_level+1)*3)
 
 class FeaturePlanes(nn.Module):
-    def __init__(self, world_size, xyz_min, xyz_max, feat_dim = 24, mlp_width = [168], out_dim=[11], subplane_multiplier=1):
+    def __init__(self, use_single_mlp, world_size, xyz_min, xyz_max, feat_dim = 24, mlp_width = [168], out_dim=[11], subplane_multiplier=1):
         super(FeaturePlanes, self).__init__()
         
         self.world_size, self.xyz_min, self.xyz_max = world_size, xyz_min, xyz_max
@@ -102,6 +102,13 @@ class FeaturePlanes(nn.Module):
                                 nn.ReLU(),
                                 nn.Linear(mlp_width[i], out_dim[i])
                                 ))
+        self.use_single_mlp = use_single_mlp
+        self.single_mlp = nn.Sequential(nn.Linear(self.k0s[0].get_dim()*3, mlp_width[0]),
+                                         nn.ReLU(),
+                                            nn.Linear(mlp_width[0], mlp_width[0]),
+                                            nn.ReLU(),
+                                            nn.Linear(mlp_width[0], out_dim[0])
+                                            )
 
 
     def forward(self, x, Q=0):
@@ -112,17 +119,22 @@ class FeaturePlanes(nn.Module):
         for i in range(self.activate_level + 1):
             feat = self.k0s[i](x , Q)
             level_features.append(feat)
+        if self.use_single_mlp:
+            # we concat coarse middle and fine level
+            level_features = torch.cat(level_features, dim=-1)
+            return self.single_mlp(level_features)
+        else:
         # 将不同层级的feature分别送入独立的mlp
-        res = []
-        cnt =0
-        for m,feat in zip(self.models,level_features):
-            rr = m(feat)
-            res.append(rr)
-            cnt = cnt + 1
-            if cnt>self.activate_level:
-                break
-        
-        return sum(res)
+            res = []
+            cnt =0
+            for m,feat in zip(self.models,level_features):
+                rr = m(feat)
+                res.append(rr)
+                cnt = cnt + 1
+                if cnt>self.activate_level:
+                    break
+            
+            return sum(res)
 
 # 三平面的类
 class PlaneGrid(nn.Module):

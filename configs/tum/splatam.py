@@ -49,6 +49,7 @@ config = dict(
         ymax = 3.2,
         zmin = -2.0,
         zmax = 4.9,
+        use_single_mlp = True
     ),
     wandb=dict(
         entity="theairlab",

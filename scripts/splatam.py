@@ -170,13 +170,14 @@ def initialize_optimizer(params, our_model, lrs_dict, tracking):
     for i in range(3):
         if i==0:
             param_groups.append({'params': our_model['tri_plane']._feat.k0s[i].parameters(), 'lr': lrs_dict['plane1'], 'name': 'feat_plane1'})
-            param_groups.append({'params': our_model['tri_plane']._feat.models[i].parameters(), 'lr': lrs_dict['mlp1'], 'name': 'fp_mlp_f1'})
+            # param_groups.append({'params': our_model['tri_plane']._feat.models[i].parameters(), 'lr': lrs_dict['mlp1'], 'name': 'fp_mlp_f1'})
         elif i==1:
             param_groups.append({'params': our_model['tri_plane']._feat.k0s[i].parameters(), 'lr': lrs_dict['plane2'], 'name': 'feat_plane2'})
-            param_groups.append({'params': our_model['tri_plane']._feat.models[i].parameters(), 'lr': lrs_dict['mlp2'], 'name': 'fp_mlp_f2'})
+            # param_groups.append({'params': our_model['tri_plane']._feat.models[i].parameters(), 'lr': lrs_dict['mlp2'], 'name': 'fp_mlp_f2'})
         else:
             param_groups.append({'params': our_model['tri_plane']._feat.k0s[i].parameters(), 'lr': lrs_dict['plane3'], 'name': 'feat_plane3'})
-            param_groups.append({'params': our_model['tri_plane']._feat.models[i].parameters(), 'lr': lrs_dict['mlp3'], 'name': 'fp_mlp_f3'})
+            # param_groups.append({'params': our_model['tri_plane']._feat.models[i].parameters(), 'lr': lrs_dict['mlp3'], 'name': 'fp_mlp_f3'})
+    param_groups.append({'params': our_model['tri_plane']._feat.single_mlp.parameters(), 'lr': lrs_dict['mlp1'], 'name': 'fp_mlp_f1'})
     if tracking:
         return torch.optim.Adam(param_groups)
     else:
