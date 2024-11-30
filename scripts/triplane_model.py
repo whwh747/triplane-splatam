@@ -11,12 +11,12 @@ class GaussianLearner(nn.Module):
         self.xyz_min = torch.tensor(xyz_min).cuda()
         self.xyz_max = torch.tensor(xyz_max).cuda()
 
-        self.world_size = [model_params['plane_size']]*3
+        self.world_size = [model_params['coarse'], model_params['fine']]
         self.max_step = 6
         self.current_step = 0
 
         self._feat = FeaturePlanes(use_single_mlp = model_params['use_single_mlp'], world_size=self.world_size, xyz_min = self.xyz_min, xyz_max= self.xyz_max,
-                                    feat_dim = model_params['num_channels'], mlp_width = [model_params['mlp_dim']], out_dim=[35], subplane_multiplier=model_params['subplane_multiplier'] )  # 27,4,3,1
+                                    feat_dim = model_params['num_channels'], mlp_width = [model_params['mlp_dim']], out_dim=[8], subplane_multiplier=model_params['subplane_multiplier'] )  # 27,4,3,1
 
         self.register_buffer('opacity_scale', torch.tensor(10))
         self.opacity_scale = self.opacity_scale.cuda()
@@ -24,47 +24,43 @@ class GaussianLearner(nn.Module):
         # self.entropy_gaussian = Entropy_gaussian(Q=1).cuda()
 
 
-    def activate_plane_level(self):
-        self._feat.activate_level +=1
-        print('******* Plane Level to:', self._feat.activate_level)
+    # def activate_plane_level(self):
+    #     self._feat.activate_level +=1
+    #     print('******* Plane Level to:', self._feat.activate_level)
 
 
     def inference(self, xyz):
         inputs = xyz.cuda().detach()
         
         tmp  = self._feat(inputs, self.Q0)
-        # features = tmp[:,:3]
-        # rotations = tmp[:,3:3+4]
-        # scale = tmp[:,7:7+3]
-        # opacity = tmp[:,10:]
-        # scale = torch.sigmoid(scale)
-        features = tmp[:,:27]
-        rotations = tmp[:,27:27+4]
-        scale = tmp[:,31:31+3]
-        opacity = tmp[:,34:]
+        # features = tmp[:,:27]
+        rotations = tmp[:,:4]
+        scale = tmp[:,4:4+3]
+        opacity = tmp[:,7:]
         scale = torch.sigmoid(scale)
 
-        return opacity*10, scale, features, rotations
+        # return opacity*10, scale, features, rotations
+        return opacity*10, scale, rotations
 
-    def tv_loss(self, w):
-        for level in range(self._feat.activate_level+1):
-            factor = 1.0
-            self._feat.k0s[level].total_variation_add_grad(w*((0.5)**(2-level)))
+    # def tv_loss(self, w):
+    #     for level in range(self._feat.activate_level+1):
+    #         factor = 1.0
+    #         self._feat.k0s[level].total_variation_add_grad(w*((0.5)**(2-level)))
             
 
-    def calc_sparsity(self):
+    # def calc_sparsity(self):
 
-        plane = self._feat
-        res = 0
-        for level in range(self._feat.activate_level+1):
+    #     plane = self._feat
+    #     res = 0
+    #     for level in range(self._feat.activate_level+1):
   
-            factor = 1.0
+    #         factor = 1.0
             
-            for data in [plane.k0s[level].xy_plane, plane.k0s[level].xz_plane, plane.k0s[level].yz_plane]:
-                l1norm = torch.mean(torch.abs(data))
-                res += l1norm * ((0.4)**(2-level)) * factor
+    #         for data in [plane.k0s[level].xy_plane, plane.k0s[level].xz_plane, plane.k0s[level].yz_plane]:
+    #             l1norm = torch.mean(torch.abs(data))
+    #             res += l1norm * ((0.4)**(2-level)) * factor
 
-        return res / ((self._feat.activate_level+1)*3)
+    #     return res / ((self._feat.activate_level+1)*3)
 
 class FeaturePlanes(nn.Module):
     def __init__(self, use_single_mlp, world_size, xyz_min, xyz_max, feat_dim = 24, mlp_width = [168], out_dim=[11], subplane_multiplier=1):
@@ -72,15 +68,15 @@ class FeaturePlanes(nn.Module):
         
         self.world_size, self.xyz_min, self.xyz_max = world_size, xyz_min, xyz_max
         # 激活层个数  因为三层是逐步训练的   slam时  三层一起训练  但应用不同的学习率
-        self.activate_level = 2
-        self.num_levels = 3
+        self.activate_level = 1
+        self.num_levels = 2
         self.level_factor = 0.5
 
         t_ws = torch.tensor(world_size)
         # k0s中存储3个三平面
         self.k0s =  torch.nn.ModuleList()
 
-        plane_res = [0.24, 0.12, 0.06]
+        plane_res = world_size
         xyz_len = xyz_max - xyz_min
         for grid_res in plane_res:
             grid_shape = list(map(int, (xyz_len / grid_res).tolist()))
@@ -89,21 +85,21 @@ class FeaturePlanes(nn.Module):
             print('Grid Shape:', grid_shape)
 
         # 存储MLP网络
-        self.models = torch.nn.ModuleList()
+        # self.models = torch.nn.ModuleList()
 
         mlp_width = [mlp_width[0],mlp_width[0],mlp_width[0]] 
         out_dim = [out_dim[0],out_dim[0],out_dim[0]]
 
-        for i in range(self.num_levels):
-            self.models.append(nn.Sequential(
-                                nn.Linear(self.k0s[i].get_dim(), mlp_width[i]),
-                                nn.ReLU(),
-                                nn.Linear(mlp_width[i], mlp_width[i]),
-                                nn.ReLU(),
-                                nn.Linear(mlp_width[i], out_dim[i])
-                                ))
+        # for i in range(self.num_levels):
+        #     self.models.append(nn.Sequential(
+        #                         nn.Linear(self.k0s[i].get_dim(), mlp_width[i]),
+        #                         nn.ReLU(),
+        #                         nn.Linear(mlp_width[i], mlp_width[i]),
+        #                         nn.ReLU(),
+        #                         nn.Linear(mlp_width[i], out_dim[i])
+        #                         ))
         self.use_single_mlp = use_single_mlp
-        self.single_mlp = nn.Sequential(nn.Linear(self.k0s[0].get_dim()*3, mlp_width[0]),
+        self.single_mlp = nn.Sequential(nn.Linear(self.k0s[0].get_dim()*2, mlp_width[0]),
                                          nn.ReLU(),
                                             nn.Linear(mlp_width[0], mlp_width[0]),
                                             nn.ReLU(),
@@ -115,26 +111,26 @@ class FeaturePlanes(nn.Module):
         # Pass the input through k0
 
         level_features = []
-
-        for i in range(self.activate_level + 1):
+        # 从不同分辨率的三平面中解码feature
+        for i in range(self.num_levels):
             feat = self.k0s[i](x , Q)
             level_features.append(feat)
         if self.use_single_mlp:
             # we concat coarse middle and fine level
             level_features = torch.cat(level_features, dim=-1)
             return self.single_mlp(level_features)
-        else:
-        # 将不同层级的feature分别送入独立的mlp
-            res = []
-            cnt =0
-            for m,feat in zip(self.models,level_features):
-                rr = m(feat)
-                res.append(rr)
-                cnt = cnt + 1
-                if cnt>self.activate_level:
-                    break
+        # else:
+        # # 将不同层级的feature分别送入独立的mlp
+        #     res = []
+        #     cnt =0
+        #     for m,feat in zip(self.models,level_features):
+        #         rr = m(feat)
+        #         res.append(rr)
+        #         cnt = cnt + 1
+        #         if cnt>self.activate_level:
+        #             break
             
-            return sum(res)
+        #     return sum(res)
 
 # 三平面的类
 class PlaneGrid(nn.Module):
@@ -156,7 +152,7 @@ class PlaneGrid(nn.Module):
         Y = Y*self.scale
         Z = Z*self.scale
         self.world_size = torch.tensor([X,Y,Z])
-        R = self.channels //3
+        R = self.channels
         Rxy = R
         # 定义其中每一个二维平面 维度是X*Y 每个维度上的特征数是R
         self.xy_plane = nn.Parameter(torch.randn([1, Rxy, X, Y ]) * 0.1)
@@ -186,23 +182,8 @@ class PlaneGrid(nn.Module):
         xy_feat = F.grid_sample(self.xy_plane, ind_norm[:,:,:,[1,0]], mode='bilinear', align_corners=True).flatten(0,2).T
         xz_feat = F.grid_sample(self.xz_plane, ind_norm[:,:,:,[2,0]], mode='bilinear', align_corners=True).flatten(0,2).T
         yz_feat = F.grid_sample(self.yz_plane, ind_norm[:,:,:,[2,1]], mode='bilinear', align_corners=True).flatten(0,2).T
-
-        # Aggregate components
-        # Q不等于0时会加入噪声
-        if Q == 0:
-            feat = torch.cat([
-                xy_feat ,
-                xz_feat ,
-                yz_feat
-            ], dim=-1)
-        else:
-            feat = torch.cat([
-                xy_feat + torch.empty_like(xy_feat).uniform_(-0.5, 0.5) * Q,
-                xz_feat + torch.empty_like(xz_feat).uniform_(-0.5, 0.5) * Q,
-                yz_feat + torch.empty_like(yz_feat).uniform_(-0.5, 0.5) * Q 
-            ], dim=-1)
-
-
+        # xy xz yz 三个平面的特征相加
+        feat = xy_feat + xz_feat + yz_feat
         return feat       
 
     def forward(self, xyz, Q = 0, dir=None, center=None):
@@ -274,8 +255,8 @@ class Conctractor(nn.Module):
     def __init__(self, xyz_min, xyz_max, enable = True):
         super().__init__()
         self.enable = enable
-        if not self.enable:
-            print('**Disable Contractor**')
+        # if not self.enable:
+        #     print('**Disable Contractor**')
         self.register_buffer('xyz_min', xyz_min)
         self.register_buffer('xyz_max', xyz_max)
 
@@ -303,7 +284,8 @@ class Conctractor(nn.Module):
     
 def inference_gs(model, points):
     if model['enable_net']:
-        opacity_net, scales_net, rgb_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points))
+        # opacity_net, scales_net, rgb_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points.detach()))
+        opacity_net, scales_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points.detach()))
         scales_net = (scales_net-1)*5-2
         scales_net = scales_net.mean(dim=1 , keepdim=True)
         # rgb_net = F.normalize(rgb_net, dim=1)
@@ -330,19 +312,20 @@ def inference_gs(model, points):
 @torch.no_grad()
 def inference_gs_nograd(model, points):
     if model['enable_net']:
-        opacity_net, scales_net, rgb_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points))
+        # opacity_net, scales_net, rgb_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points.detach()))
+        opacity_net, scales_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points.detach()))
         scales_net = (scales_net-1)*5-2
         scales_net = scales_net.mean(dim=1 , keepdim=True)
         # rgb_net = F.normalize(rgb_net, dim=1)
-        rgb_net = rgb_net.view(rgb_net.size(0), (model['max_sh_degree'] + 1) ** 2, 3)
-        feature_dc = rgb_net[:,0:1,:]
-        feature_rest = rgb_net[:,1:,:]
         if model['use_mlp_color']:
             xyz = contract_to_unisphere(points.clone().detach(), torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device='cuda'))
             dir_pp = (points - model['cam'].campos.repeat(points.shape[0], 1))
             dir_pp = dir_pp / dir_pp.norm(dim=1, keepdim=True)
             shs = model['mlp_head'](torch.cat([model['recolor'](xyz), model['direction_encoding'](dir_pp)], dim=-1)).unsqueeze(1)
         else:
+            rgb_net = rgb_net.view(rgb_net.size(0), (model['max_sh_degree'] + 1) ** 2, 3)
+            feature_dc = rgb_net[:,0:1,:]
+            feature_rest = rgb_net[:,1:,:]
             shs = torch.cat((feature_dc, feature_rest), dim=1)
         params_net = {
         'means3D': points,

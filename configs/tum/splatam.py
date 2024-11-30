@@ -6,13 +6,13 @@ primary_device = "cuda:0"
 scenes = ["freiburg1_desk", "freiburg1_desk2", "freiburg1_room", "freiburg2_xyz", "freiburg3_long_office_household"]
 
 seed = int(0)
-scene_name = scenes[int(0)]
+scene_name = scenes[int(2)]
 
 map_every = 1
 keyframe_every = 5
 mapping_window_size = 20
 tracking_iters = 200
-mapping_iters = 30
+mapping_iters = 50
 scene_radius_depth_ratio = 2
 
 group_name = "TUM"
@@ -38,9 +38,8 @@ config = dict(
     checkpoint_interval=100, # Checkpoint Interval
     use_wandb=False,
     triplane=dict(
-        plane_size = 2500,
-        num_channels = 24,
-        mlp_dim = 64,
+        num_channels = 32,
+        mlp_dim = 32,
         subplane_multiplier = 1,
         # bound
         xmin = -4.6,
@@ -49,7 +48,9 @@ config = dict(
         ymax = 3.2,
         zmin = -2.0,
         zmax = 4.9,
-        use_single_mlp = True
+        use_single_mlp = True,
+        coarse = 0.24,
+        fine = 0.06,
     ),
     wandb=dict(
         entity="theairlab",
@@ -112,6 +113,7 @@ config = dict(
         use_uncertainty_for_loss_mask=False,
         use_uncertainty_for_loss=False,
         use_chamfer=False,
+        opt_rskm_interval=10,
         loss_weights=dict(
             im=0.5,
             depth=1.0,
@@ -119,13 +121,9 @@ config = dict(
         ),
         lrs=dict(
             means3D=0.0001,
-            # rgb_colors=0.0025,
             rgb_colors=0.0,
-            # unnorm_rotations=0.001,
             unnorm_rotations=0.0,
-            # logit_opacities=0.05,
             logit_opacities=0.0,
-            # log_scales=0.001,
             log_scales=0.0,
             cam_unnorm_rots=0.0000,
             cam_trans=0.0000,

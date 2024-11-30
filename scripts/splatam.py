@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 import wandb
+import random
 
 from datasets.gradslam_datasets import (load_dataset_config, ICLDataset, ReplicaDataset, ReplicaV2Dataset, AzureKinectDataset,
                                         ScannetDataset, Ai2thorDataset, Record3DDataset, RealsenseDataset, TUMDataset,
@@ -174,8 +175,8 @@ def initialize_optimizer(params, our_model, lrs_dict, tracking):
         elif i==1:
             param_groups.append({'params': our_model['tri_plane']._feat.k0s[i].parameters(), 'lr': lrs_dict['plane2'], 'name': 'feat_plane2'})
             # param_groups.append({'params': our_model['tri_plane']._feat.models[i].parameters(), 'lr': lrs_dict['mlp2'], 'name': 'fp_mlp_f2'})
-        else:
-            param_groups.append({'params': our_model['tri_plane']._feat.k0s[i].parameters(), 'lr': lrs_dict['plane3'], 'name': 'feat_plane3'})
+        # else:
+        #     param_groups.append({'params': our_model['tri_plane']._feat.k0s[i].parameters(), 'lr': lrs_dict['plane3'], 'name': 'feat_plane3'})
             # param_groups.append({'params': our_model['tri_plane']._feat.models[i].parameters(), 'lr': lrs_dict['mlp3'], 'name': 'fp_mlp_f3'})
     param_groups.append({'params': our_model['tri_plane']._feat.single_mlp.parameters(), 'lr': lrs_dict['mlp1'], 'name': 'fp_mlp_f1'})
     if tracking:
@@ -265,6 +266,7 @@ def get_loss(our_model, params, params_net, curr_data, variables, iter_time_idx,
 
     # RGB Rendering
     rendervar['means2D'].retain_grad()
+    # GaussianRasterizer
     im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
     variables['means2D'] = rendervar['means2D']  # Gradient only accum from colour render for densification
 
@@ -356,12 +358,12 @@ def get_loss(our_model, params, params_net, curr_data, variables, iter_time_idx,
         # plt.close()
 
     # add sparsity loss
-    if tracking:
-        sparsity_loss = torch.tensor(0.0, device="cuda")
-    else:
-        sparsity_loss = our_model['tri_plane'].calc_sparsity()
-    if our_model['use_spatial']:
-        losses['sparsity'] = sparsity_loss
+    # if tracking:
+    #     sparsity_loss = torch.tensor(0.0, device="cuda")
+    # else:
+    #     sparsity_loss = our_model['tri_plane'].calc_sparsity()
+    # if our_model['use_spatial']:
+    #     losses['sparsity'] = sparsity_loss
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(weighted_losses.values())
 
@@ -490,8 +492,6 @@ def convert_params_to_store(params):
 
 
 def rgbd_slam(config: dict):
-    # Print Config
-    # print("Loaded Config:")
     if "use_depth_loss_thres" not in config['tracking']:
         config['tracking']['use_depth_loss_thres'] = False
         config['tracking']['depth_loss_thres'] = 100000
@@ -499,32 +499,17 @@ def rgbd_slam(config: dict):
         config['tracking']['visualize_tracking_loss'] = False
     if "gaussian_distribution" not in config:
         config['gaussian_distribution'] = "isotropic"
-    # print(f"{config}")
 
-    # Create Output Directories
     # Create a new output directory with a timestamp to avoid overwriting
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     output_dir = os.path.join(config["workdir"], f"{config['run_name']}_{timestamp}")
-    # output_dir = os.path.join(config["workdir"], config["run_name"])
     eval_dir = os.path.join(output_dir, "eval")
     os.makedirs(eval_dir, exist_ok=True)
-    
-    # Init WandB
-    if config['use_wandb']:
-        wandb_time_step = 0
-        wandb_tracking_step = 0
-        wandb_mapping_step = 0
-        wandb_run = wandb.init(project=config['wandb']['project'],
-                               entity=config['wandb']['entity'],
-                               group=config['wandb']['group'],
-                               name=config['wandb']['name'],
-                               config=config)
 
     # Get Device
     device = torch.device(config["primary_device"])
 
     # Load Dataset
-    print("Loading Dataset ...")
     dataset_config = config["data"]
     if "gradslam_data_cfg" not in dataset_config:
         gradslam_data_cfg = {}
@@ -683,9 +668,7 @@ def rgbd_slam(config: dict):
     contractor = Conctractor(xyz_min = torch.tensor([config['triplane']['xmin'], config['triplane']['ymin'], config['triplane']['zmin']]),
                              xyz_max = torch.tensor([config['triplane']['xmax'], config['triplane']['ymax'], config['triplane']['zmax']]), enable = False).cuda()
     # enalbe_net 表示使用三平面+mlp仅推理高斯函数的 opacity rgb scale rotation
-    # magic_k 表示仅使用隐式参数来渲染图像  计算损失
     enable_net = True
-    magic_k = False
     max_sh_degree = 2
     recolor = tcnn.Encoding(
         n_input_dims=3,
@@ -721,7 +704,6 @@ def rgbd_slam(config: dict):
         'tri_plane' : tri_plane, # 三平面模型
         'contractor' : contractor, # 将点压缩到三平面的模型 这个模型不需要优化
         'enable_net' : enable_net, # 是否使用三平面+mlp来推理高斯函数的 opacity shs scale rotation
-        'magic_k' : magic_k, # 暂时未使用 （显式与隐式协同优化时使用）
         'max_sh_degree' : max_sh_degree, # 最大的球谐函数的阶数
         'recolor' : recolor, # 用于编码颜色的模型
         'direction_encoding' : direction_encoding, # 用于编码方向的模型
@@ -735,9 +717,9 @@ def rgbd_slam(config: dict):
     #    and mlp_head will inference shs
     # 2. if enable_net is True and use_mlp_color is False, then tri_plane will inference opacity, scale, rotation, and shs
     # 3. if enable_net is Fasle, then we same as the original SplaTAM
-
+    progress_bar_slam = tqdm(range(checkpoint_time_idx, num_frames), desc="SLAM Progress")
     # Iterate over Scan
-    for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
+    for time_idx in range(checkpoint_time_idx, num_frames):
         # Load RGBD frames incrementally instead of all frames
         color, depth, _, gt_pose = dataset[time_idx]
         # Process poses
@@ -763,15 +745,13 @@ def rgbd_slam(config: dict):
         else:
             tracking_curr_data = curr_data
 
-        # Optimization Iterations
-        num_iters_mapping = config['mapping']['num_iters']
         
         # Initialize the camera pose for the current frame
         if time_idx > 0:
             params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
 
         # Tracking
-        # now, we use gt poses for tracking!!!
+        params_net_tracking = inference_gs_nograd(our_model, params['means3D'])
         tracking_start_time = time.time()
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
             # Reset Optimizer & Learning Rates for tracking
@@ -780,14 +760,14 @@ def rgbd_slam(config: dict):
             candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
             candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
             current_min_loss = float(1e20)
+
             # Tracking Optimization
             iter = 0
             do_continue_slam = False
             num_iters_tracking = config['tracking']['num_iters']
-            progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
+            # progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
             # inference guassian attribute once
 
-            params_net_tracking = inference_gs_nograd(our_model, params['means3D'])
             while True:
                 iter_start_time = time.time()
                 # Loss for current frame
@@ -796,9 +776,6 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
                                                    tracking_iteration=iter)
-                if config['use_wandb']:
-                    # Report Loss
-                    wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
                 # Backprop
                 loss.backward()
                 # Optimizer Update
@@ -811,14 +788,10 @@ def rgbd_slam(config: dict):
                         candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
                         candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
                     # Report Progress
-                    if config['report_iter_progress']:
-                        if config['use_wandb']:
-                            report_progress(params, params_net, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
-                                            wandb_run=wandb_run, wandb_step=wandb_tracking_step, wandb_save_qual=config['wandb']['save_qual'])
-                        else:
-                            report_progress(params, params_net_tracking, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
-                    else:
-                        progress_bar.update(1)
+                    # if config['report_iter_progress']:
+                    #     report_progress(params, params_net_tracking, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
+                    # else:
+                    #     progress_bar.update(1)
                 # Update the runtime numbers
                 iter_end_time = time.time()
                 tracking_iter_time_sum += iter_end_time - iter_start_time
@@ -832,13 +805,10 @@ def rgbd_slam(config: dict):
                         do_continue_slam = True
                         progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
                         num_iters_tracking = 2*num_iters_tracking
-                        if config['use_wandb']:
-                            wandb_run.log({"Tracking/Extra Tracking Iters Frames": time_idx,
-                                        "Tracking/step": wandb_time_step})
                     else:
                         break
 
-            progress_bar.close()
+            # progress_bar.close()
             # Copy over the best candidate rotation & translation
             with torch.no_grad():
                 params['cam_unnorm_rots'][..., time_idx] = candidate_cam_unnorm_rot
@@ -858,22 +828,23 @@ def rgbd_slam(config: dict):
         tracking_frame_time_sum += tracking_end_time - tracking_start_time
         tracking_frame_time_count += 1
 
-        if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
-            try:
-                # Report Final Tracking Progress
-                progress_bar = tqdm(range(1), desc=f"Tracking Result Time Step: {time_idx}")
-                with torch.no_grad():
-                    if config['use_wandb']:
-                        report_progress(params, params_net, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
-                                        wandb_run=wandb_run, wandb_step=wandb_time_step, wandb_save_qual=config['wandb']['save_qual'], global_logging=True)
-                    else:
-                        report_progress(params, params_net_tracking, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
-                progress_bar.close()
-            except:
-                ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-                # save_params_ckpt(params, ckpt_output_dir, time_idx)
-                print('Failed to evaluate trajectory.')
+        # if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
+        #     try:
+        #         # Report Final Tracking Progress
+        #         progress_bar = tqdm(range(1), desc=f"Tracking Result Time Step: {time_idx}")
+        #         # params_net_tracking = inference_gs_nograd(our_model, params['means3D'])
+        #         with torch.no_grad():
+        #             report_progress(params, params_net_tracking, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
+        #         progress_bar.close()
+        #     except:
+        #         import traceback
+        #         traceback.print_exc()
+        #         ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
+        #         # save_params_ckpt(params, ckpt_output_dir, time_idx)
+        #         print('Failed to evaluate trajectory.')
 
+        # Optimization Iterations
+        num_iters_mapping = config['mapping']['num_iters']
         # Densification & KeyFrame-based Mapping
         if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
             # Densification
@@ -890,60 +861,73 @@ def rgbd_slam(config: dict):
                     densify_curr_data = curr_data
 
                 # Add new Gaussians to the scene based on the Silhouette
-                params_net_densification = inference_gs(our_model, params['means3D'])
-                params, variables = add_new_gaussians(params, params_net_densification, variables, densify_curr_data, 
+                params, variables = add_new_gaussians(params, params_net_tracking, variables, densify_curr_data, 
                                                       config['mapping']['sil_thres'], time_idx,
                                                       config['mean_sq_dist_method'], config['gaussian_distribution'])
-                post_num_pts = params['means3D'].shape[0]
-                if config['use_wandb']:
-                    wandb_run.log({"Mapping/Number of Gaussians": post_num_pts,
-                                   "Mapping/step": wandb_time_step})
-            
-            with torch.no_grad():
-                # Get the current estimated rotation & translation
-                curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
-                curr_cam_tran = params['cam_trans'][..., time_idx].detach()
-                curr_w2c = torch.eye(4).cuda().float()
-                curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-                curr_w2c[:3, 3] = curr_cam_tran
-                # Select Keyframes for Mapping
-                num_keyframes = config['mapping_window_size']-2
-                selected_keyframes = keyframe_selection_overlap(depth, curr_w2c, intrinsics, keyframe_list[:-1], num_keyframes)
-                selected_time_idx = [keyframe_list[frame_idx]['id'] for frame_idx in selected_keyframes]
-                if len(keyframe_list) > 0:
-                    # Add last keyframe to the selected keyframes
-                    selected_time_idx.append(keyframe_list[-1]['id'])
-                    selected_keyframes.append(len(keyframe_list)-1)
-                # Add current frame to the selected keyframes
-                selected_time_idx.append(time_idx)
-                selected_keyframes.append(-1)
-                # Print the selected keyframes
-                print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
+                # post_num_pts = params['means3D'].shape[0]
+            # splaTAM Keyframe selection！！！
+            # with torch.no_grad():
+            #     # Get the current estimated rotation & translation
+            #     curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
+            #     curr_cam_tran = params['cam_trans'][..., time_idx].detach()
+            #     curr_w2c = torch.eye(4).cuda().float()
+            #     curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
+            #     curr_w2c[:3, 3] = curr_cam_tran
+            #     # Select Keyframes for Mapping
+            #     num_keyframes = config['mapping_window_size']-2
+            #     selected_keyframes = keyframe_selection_overlap(depth, curr_w2c, intrinsics, keyframe_list[:-1], num_keyframes)
+            #     selected_time_idx = [keyframe_list[frame_idx]['id'] for frame_idx in selected_keyframes]
+            #     if len(keyframe_list) > 0:
+            #         # Add last keyframe to the selected keyframes
+            #         selected_time_idx.append(keyframe_list[-1]['id'])
+            #         selected_keyframes.append(len(keyframe_list)-1)
+            #     # Add current frame to the selected keyframes
+            #     selected_time_idx.append(time_idx)
+            #     selected_keyframes.append(-1)
+            #     # Print the selected keyframes
+            #     print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
             # Reset Optimizer & Learning Rates for Full Map Optimization
             optimizer = initialize_optimizer(params, our_model, config['mapping']['lrs'], tracking=False) 
 
             # Mapping
             mapping_start_time = time.time()
-            if num_iters_mapping > 0:
-                progress_bar = tqdm(range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}")
+            if time_idx == 0:
+                num_iters_mapping = 1000
+            else:
+                num_iters_mapping = config['mapping']['num_iters']
+            # if num_iters_mapping > 0:
+            #     progress_bar = tqdm(range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}")
             for iter in range(num_iters_mapping):
                 iter_start_time = time.time()
                 # inference gs attribute every iter
                 params_net_mapping = inference_gs(our_model, params['means3D'])
-                # Randomly select a frame until current time step amongst keyframes
-                rand_idx = np.random.randint(0, len(selected_keyframes))
-                selected_rand_keyframe_idx = selected_keyframes[rand_idx]
-                if selected_rand_keyframe_idx == -1:
+                
+                if time_idx == 0 or iter % config['mapping']['opt_rskm_interval'] == 0:
                     # Use Current Frame Data
                     iter_time_idx = time_idx
                     iter_color = color
                     iter_depth = depth
                 else:
+                    keyframe_idx = random.choice(range(len(keyframe_time_indices)))
                     # Use Keyframe Data
-                    iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
-                    iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
-                    iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
+                    iter_time_idx = keyframe_list[keyframe_idx]['id']
+                    iter_color = keyframe_list[keyframe_idx]['color']
+                    iter_depth = keyframe_list[keyframe_idx]['depth']
+                
+                # Randomly select a frame until current time step amongst keyframes
+                # rand_idx = np.random.randint(0, len(selected_keyframes))
+                # selected_rand_keyframe_idx = selected_keyframes[rand_idx]
+                # if selected_rand_keyframe_idx == -1:
+                #     # Use Current Frame Data
+                #     iter_time_idx = time_idx
+                #     iter_color = color
+                #     iter_depth = depth
+                # else:
+                #     # Use Keyframe Data
+                #     iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
+                #     iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
+                #     iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
                 iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
                 iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
                              'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
@@ -951,67 +935,49 @@ def rgbd_slam(config: dict):
                 loss, variables, losses = get_loss(our_model, params, params_net_mapping, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
                                                 config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
                                                 config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
-                if config['use_wandb']:
-                    # Report Loss
-                    wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
                 # Backprop
                 loss.backward()
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+                
                 with torch.no_grad():
                     # Prune Gaussians
                     if config['mapping']['prune_gaussians']:
                         params, variables = prune_gaussians(params, params_net_mapping, variables, optimizer, iter, config['mapping']['pruning_dict'])
-                        if config['use_wandb']:
-                            wandb_run.log({"Mapping/Number of Gaussians - Pruning": params['means3D'].shape[0],
-                                           "Mapping/step": wandb_mapping_step})
                     # Gaussian-Splatting's Gradient-based Densification
                     if config['mapping']['use_gaussian_splatting_densification']:
                         params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
-                        if config['use_wandb']:
-                            wandb_run.log({"Mapping/Number of Gaussians - Densification": params['means3D'].shape[0],
-                                           "Mapping/step": wandb_mapping_step})
+
                     # Optimizer Update
-                    
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
                     # Report Progress
-                    if config['report_iter_progress']:
-                        if config['use_wandb']:
-                            report_progress(params, params_net_mapping, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            wandb_run=wandb_run, wandb_step=wandb_mapping_step, wandb_save_qual=config['wandb']['save_qual'],
-                                            mapping=True, online_time_idx=time_idx)
-                        else:
-                            report_progress(params, params_net_mapping, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            mapping=True, online_time_idx=time_idx)
-                    else:
-                        progress_bar.update(1)
+                    # if config['report_iter_progress']:
+                    #     report_progress(params, params_net_mapping, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
+                    #                         mapping=True, online_time_idx=time_idx)
+                    # else:
+                    #     progress_bar.update(1)
                 # Update the runtime numbers
                 iter_end_time = time.time()
                 mapping_iter_time_sum += iter_end_time - iter_start_time
                 mapping_iter_time_count += 1
-            if num_iters_mapping > 0:
-                progress_bar.close()
+            # if num_iters_mapping > 0:
+            #     progress_bar.close()
             # Update the runtime numbers
             mapping_end_time = time.time()
             mapping_frame_time_sum += mapping_end_time - mapping_start_time
             mapping_frame_time_count += 1
 
-            if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
-                try:
-                    # Report Mapping Progress
-                    progress_bar = tqdm(range(1), desc=f"Mapping Result Time Step: {time_idx}")
-                    with torch.no_grad():
-                        if config['use_wandb']:
-                            report_progress(params, params_net, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            wandb_run=wandb_run, wandb_step=wandb_time_step, wandb_save_qual=config['wandb']['save_qual'],
-                                            mapping=True, online_time_idx=time_idx, global_logging=True)
-                        else:
-                            report_progress(params, params_net_mapping, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            mapping=True, online_time_idx=time_idx)
-                    progress_bar.close()
-                except:
-                    ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-                    # save_params_ckpt(params, ckpt_output_dir, time_idx)
-                    print('Failed to evaluate trajectory.')
+            # if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
+            #     try:
+            #         # Report Mapping Progress
+            #         progress_bar = tqdm(range(1), desc=f"Mapping Result Time Step: {time_idx}")
+            #         with torch.no_grad():
+            #             report_progress(params, params_net_mapping, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
+            #                                 mapping=True, online_time_idx=time_idx)
+            #         progress_bar.close()
+            #     except:
+            #         ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
+            #         # save_params_ckpt(params, ckpt_output_dir, time_idx)
+            #         print('Failed to evaluate trajectory.')
         # Add frame to keyframe list
         if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
                     (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
@@ -1034,12 +1000,10 @@ def rgbd_slam(config: dict):
             # save_params_ckpt(params, ckpt_output_dir, time_idx)
             np.save(os.path.join(ckpt_output_dir, f"keyframe_time_indices{time_idx}.npy"), np.array(keyframe_time_indices))
         
-        # Increment WandB Time Step
-        if config['use_wandb']:
-            wandb_time_step += 1
 
         torch.cuda.empty_cache()
-
+        progress_bar_slam.update(1)
+    progress_bar_slam.close()
     # Compute Average Runtimes
     if tracking_iter_time_count == 0:
         tracking_iter_time_count = 1
@@ -1055,23 +1019,11 @@ def rgbd_slam(config: dict):
     print(f"Average Tracking/Frame Time: {tracking_frame_time_avg} s")
     print(f"Average Mapping/Iteration Time: {mapping_iter_time_avg*1000} ms")
     print(f"Average Mapping/Frame Time: {mapping_frame_time_avg} s")
-    if config['use_wandb']:
-        wandb_run.log({"Final Stats/Average Tracking Iteration Time (ms)": tracking_iter_time_avg*1000,
-                       "Final Stats/Average Tracking Frame Time (s)": tracking_frame_time_avg,
-                       "Final Stats/Average Mapping Iteration Time (ms)": mapping_iter_time_avg*1000,
-                       "Final Stats/Average Mapping Frame Time (s)": mapping_frame_time_avg,
-                       "Final Stats/step": 1})
     
     # Evaluate Final Parameters
     params_net_eval = inference_gs(our_model, params['means3D'])
     with torch.no_grad():
-        if config['use_wandb']:
-            eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                 wandb_run=wandb_run, wandb_save_qual=config['wandb']['eval_save_qual'],
-                 mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
-                 eval_every=config['eval_every'])
-        else:
-            eval(dataset, params, params_net_eval,  num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
+        eval(dataset, params, params_net_eval,  num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
                  mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
                  eval_every=config['eval_every'])
 
@@ -1101,19 +1053,18 @@ def rgbd_slam(config: dict):
         #     'mlp_head': our_model['mlp_head'].state_dict()
         # }, os.path.join(output_dir, 'params_net.pth'))
         torch.save(params['means3D'], os.path.join(output_dir, 'means3D.pth'))
-        torch.save(our_model['tri_plane'].state_dict(), os.path.join(output_dir, 'tri_plane.pth'))
+        # torch.save(our_model['tri_plane'].state_dict(), os.path.join(output_dir, 'tri_plane.pth'))
         torch.save(our_model['contractor'].state_dict(), os.path.join(output_dir, 'contractor.pth'))
         torch.save(our_model['recolor'].state_dict(), os.path.join(output_dir, 'recolor.pth'))
         torch.save(our_model['direction_encoding'].state_dict(), os.path.join(output_dir, 'direction_encoding.pth'))
         torch.save(our_model['mlp_head'].state_dict(), os.path.join(output_dir, 'mlp_head.pth'))
+        torch.save(our_model['tri_plane']._feat.k0s.state_dict(), os.path.join(output_dir, 'k0s.pth'))
+        torch.save(our_model['tri_plane']._feat.single_mlp.state_dict(), os.path.join(output_dir, 'single_mlp.pth'))
     else:
         # save params
         torch.save(params, os.path.join(output_dir, 'params.pth'))
     # save_params(params, output_dir)
 
-    # Close WandB Run
-    if config['use_wandb']:
-        wandb.finish()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
