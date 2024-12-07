@@ -6,18 +6,19 @@ primary_device = "cuda:0"
 scenes = ["freiburg1_desk", "freiburg1_desk2", "freiburg1_room", "freiburg2_xyz", "freiburg3_long_office_household"]
 
 seed = int(0)
-scene_name = scenes[int(2)]
+# scene_name = scenes[int(os.environ["SCENE_NUM"])]
+scene_name = scenes[int(3)]
 
 map_every = 1
 keyframe_every = 5
 mapping_window_size = 20
 tracking_iters = 200
-mapping_iters = 50
+mapping_iters = 30
 scene_radius_depth_ratio = 2
 
 group_name = "TUM"
 run_name = f"{scene_name}_seed{seed}"
-
+dim = 16
 config = dict(
     workdir=f"./experiments/{group_name}",
     run_name=run_name,
@@ -37,10 +38,9 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
     use_wandb=False,
+    use_visiable_mask = True,
     triplane=dict(
-        num_channels = 32,
-        mlp_dim = 32,
-        subplane_multiplier = 1,
+        c_dim = dim,
         # bound
         xmin = -4.6,
         xmax = 2.6,
@@ -48,9 +48,13 @@ config = dict(
         ymax = 3.2,
         zmin = -2.0,
         zmax = 4.9,
-        use_single_mlp = True,
         coarse = 0.24,
         fine = 0.06,
+    ),
+    decoder=dict(
+        c_dim = dim,
+        mlp_dim =64,
+        out_dim = 8,
     ),
     wandb=dict(
         entity="theairlab",
@@ -95,10 +99,10 @@ config = dict(
             log_scales=0.0,
             cam_unnorm_rots=0.002,
             cam_trans=0.002,
-            plane1 = 0.0,
+            plane = 0.0,
             plane2 = 0.0,
             plane3 = 0.0,
-            mlp1 = 0.0,
+            mlp = 0.0,
             mlp2 = 0.0,
             mlp3 = 0.0,
         ),
@@ -118,6 +122,11 @@ config = dict(
             im=0.5,
             depth=1.0,
             sparsity=1e-3,
+            big_gaussian_reg=0.01,
+            small_gaussian_reg=0.001,
+            so_mask = 5e-4,
+            opacity_reg = 0.001,
+            scale_reg = 1e-2,
         ),
         lrs=dict(
             means3D=0.0001,
@@ -127,10 +136,10 @@ config = dict(
             log_scales=0.0,
             cam_unnorm_rots=0.0000,
             cam_trans=0.0000,
-            plane1 = 1e-4,
+            plane = 1e-4,
             plane2 = 1e-4,
             plane3 = 1e-4,
-            mlp1 = 1e-4,
+            mlp = 1e-4,
             mlp2 = 1e-4,
             mlp3 = 1e-4,
         ),
@@ -139,9 +148,9 @@ config = dict(
             start_after=0,
             remove_big_after=0,
             stop_after=20,
-            prune_every=20,
-            removal_opacity_threshold=0.005,
-            final_removal_opacity_threshold=0.005,
+            prune_every=20,#origin is 20
+            removal_opacity_threshold=0.005,#origin is 0.005
+            final_removal_opacity_threshold=0.005,#origin is 0.005
             reset_opacities=False,
             reset_opacities_every=500, # Doesn't consider iter 0
         ),

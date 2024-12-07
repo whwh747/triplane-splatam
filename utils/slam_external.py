@@ -172,17 +172,18 @@ def prune_gaussians(params, params_net, variables, optimizer, iter, prune_dict):
             else:
                 remove_threshold = prune_dict['removal_opacity_threshold']
             # Remove Gaussians with low opacity
-            if params_net:
-                to_remove = (torch.sigmoid(params_net['logit_opacities']) < remove_threshold).squeeze()
-            else:
-                to_remove = (torch.sigmoid(params['logit_opacities']) < remove_threshold).squeeze()
+            # if params_net:
+            #     to_remove = (torch.sigmoid(params_net['logit_opacities']) < remove_threshold).squeeze()
+            # else:
+            to_remove = (torch.sigmoid(params_net['logit_opacities']) < remove_threshold).squeeze()
             # Remove Gaussians that are too big
             if iter >= prune_dict['remove_big_after']:
-                if params_net:
-                    big_points_ws = torch.exp(params_net['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
-                    small_points_ws = torch.exp(params_net['log_scales']).max(dim=1).values < 0.001 * variables['scene_radius']
-                else:
-                    big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
+                # if params_net:
+                #     big_points_ws = torch.exp(params_net['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
+                #     small_points_ws = torch.exp(params_net['log_scales']).max(dim=1).values < 0.001 * variables['scene_radius']
+                # else:
+                big_points_ws = torch.exp(params_net['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
+                small_points_ws = torch.exp(params_net['log_scales']).max(dim=1).values < 0.001 * variables['scene_radius']
                 to_remove = torch.logical_or(to_remove, big_points_ws)
                 to_remove = torch.logical_or(to_remove, small_points_ws)
             params, variables = remove_points(to_remove, params, variables, optimizer)

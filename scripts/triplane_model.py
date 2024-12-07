@@ -1,6 +1,62 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+import tinycudann as tcnn
+class TriPlane(nn.Module):
+    def __init__(self, model_params):
+        super(TriPlane, self).__init__()
+        
+        self.coarse_plane_res = model_params['coarse']
+        self.fine_plane_res = model_params['fine']
+        c_dim = model_params['c_dim']
+        xyz_min = [model_params['xmin'], model_params['ymin'], model_params['zmin']]
+        xyz_max = [model_params['xmax'], model_params['ymax'], model_params['zmax']]
+        self.xyz_min = torch.tensor(xyz_min).cuda()
+        self.xyz_max = torch.tensor(xyz_max).cuda()
+        xyz_len = self.xyz_max - self.xyz_min
+
+        planes_xy, planes_xz, planes_yz = [], [], []
+        planes_res = [self.coarse_plane_res, self.fine_plane_res]
+        planes_dim = c_dim
+        
+        for grid_res in planes_res:
+            grid_shape = list(map(int, (xyz_len / grid_res).tolist()))
+            grid_shape[0], grid_shape[2] = grid_shape[2], grid_shape[0]
+            planes_xy.append(torch.empty([1, planes_dim, *grid_shape[1:]]).normal_(mean=0, std=0.01))
+            planes_xz.append(torch.empty([1, planes_dim, grid_shape[0], grid_shape[2]]).normal_(mean=0, std=0.01))
+            planes_yz.append(torch.empty([1, planes_dim, *grid_shape[:2]]).normal_(mean=0, std=0.01))
+            print('Plane Shape:', grid_shape)
+        self.planes_xy = nn.ParameterList([nn.Parameter(p) for p in planes_xy])
+        self.planes_xz = nn.ParameterList([nn.Parameter(p) for p in planes_xz])
+        self.planes_yz = nn.ParameterList([nn.Parameter(p) for p in planes_yz])
+        
+    def forward(self, xyz):
+        xyz = xyz.cuda().detach()
+        indnorm = (xyz-self.xyz_min)*2.0 / (self.xyz_max-self.xyz_min) -1
+        vgrid = indnorm[None, :, None]
+        feat = []
+        for i in range(len(self.planes_xy)):
+            xy = F.grid_sample(self.planes_xy[i], vgrid[..., [0, 1]], padding_mode='border', align_corners=True, mode='bilinear').squeeze().transpose(0, 1)
+            xz = F.grid_sample(self.planes_xz[i], vgrid[..., [0, 2]], padding_mode='border', align_corners=True, mode='bilinear').squeeze().transpose(0, 1)
+            yz = F.grid_sample(self.planes_yz[i], vgrid[..., [1, 2]], padding_mode='border', align_corners=True, mode='bilinear').squeeze().transpose(0, 1)
+            feat.append(xy + xz + yz)
+        feat = torch.cat(feat, dim=-1)
+        return feat
+
+class Decoder(nn.Module):
+    def __init__(self, model_params):
+        super(Decoder, self).__init__()
+        mlp_width = model_params['mlp_dim']
+        output_dim = model_params['out_dim']
+        self.single_mlp = nn.Sequential(nn.Linear(model_params['c_dim']*2, mlp_width),
+                                        nn.ReLU(),
+                                        nn.Linear(mlp_width, mlp_width),
+                                        nn.ReLU(),
+                                        nn.Linear(mlp_width, output_dim)
+                                        )
+    def forward(self, feat):
+        return self.single_mlp(feat)
+
 class GaussianLearner(nn.Module):
     def __init__(self, model_params, xyz_min = [-2, -2, -2], xyz_max=[2, 2, 2] ):
         super(GaussianLearner, self).__init__()
@@ -20,8 +76,6 @@ class GaussianLearner(nn.Module):
 
         self.register_buffer('opacity_scale', torch.tensor(10))
         self.opacity_scale = self.opacity_scale.cuda()
-
-        # self.entropy_gaussian = Entropy_gaussian(Q=1).cuda()
 
 
     # def activate_plane_level(self):
@@ -86,6 +140,18 @@ class FeaturePlanes(nn.Module):
 
         # 存储MLP网络
         # self.models = torch.nn.ModuleList()
+        # plane_mlp = tcnn.Network(
+        #     n_input_dims = feat_dim * self.num_levels,
+        #     n_output_dims = 8,
+        #     network_config={
+        #         "otype": "FullyFusedMLP",
+        #         "activation": "ReLU",
+        #         "output_activation": "None",
+        #         "n_neurons": 32,
+        #         "n_hidden_layers": 2,
+        #     },
+        # )
+        # self.tcmlp = plane_mlp.cuda()
 
         mlp_width = [mlp_width[0],mlp_width[0],mlp_width[0]] 
         out_dim = [out_dim[0],out_dim[0],out_dim[0]]
@@ -119,6 +185,7 @@ class FeaturePlanes(nn.Module):
             # we concat coarse middle and fine level
             level_features = torch.cat(level_features, dim=-1)
             return self.single_mlp(level_features)
+            # return self.tcmlp(level_features)
         # else:
         # # 将不同层级的feature分别送入独立的mlp
         #     res = []
@@ -155,9 +222,9 @@ class PlaneGrid(nn.Module):
         R = self.channels
         Rxy = R
         # 定义其中每一个二维平面 维度是X*Y 每个维度上的特征数是R
-        self.xy_plane = nn.Parameter(torch.randn([1, Rxy, X, Y ]) * 0.1)
-        self.xz_plane = nn.Parameter(torch.randn([1, R,  X, Z]) * 0.1)
-        self.yz_plane = nn.Parameter(torch.randn([1, R,  Y, Z]) * 0.1)
+        self.xy_plane = nn.Parameter(torch.randn([1, Rxy, X, Y ]).normal_(mean=0, std=0.01))
+        self.xz_plane = nn.Parameter(torch.randn([1, R,  X, Z]).normal_(mean=0, std=0.01))
+        self.yz_plane = nn.Parameter(torch.randn([1, R,  Y, Z]).normal_(mean=0, std=0.01))
 
 
         # self.quant = FakeQuantize()
@@ -193,9 +260,9 @@ class PlaneGrid(nn.Module):
         shape = xyz.shape[:-1]
         xyz = xyz.reshape(1,1,-1,3)
         # 确保xyz位于[-1, 1]
-        ind_norm = (xyz - self.xyz_min) / (self.xyz_max - self.xyz_min) * 2 - 1
+        # ind_norm = (xyz - self.xyz_min) / (self.xyz_max - self.xyz_min) * 2 - 1
         # 给最后一个维度的元素后面加了一个0
-        ind_norm = torch.cat([ind_norm, torch.zeros_like(ind_norm[...,[0]])], dim=-1)
+        ind_norm = torch.cat([xyz, torch.zeros_like(xyz[...,[0]])], dim=-1)
 
        
         if self.channels > 1:
@@ -282,60 +349,56 @@ class Conctractor(nn.Module):
             indnorm[signs] *=-1
         return indnorm
     
-def inference_gs(model, points):
-    if model['enable_net']:
-        # opacity_net, scales_net, rgb_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points.detach()))
-        opacity_net, scales_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points.detach()))
-        scales_net = (scales_net-1)*5-2
-        scales_net = scales_net.mean(dim=1 , keepdim=True)
-        # rgb_net = F.normalize(rgb_net, dim=1)
-        if model['use_mlp_color']:
-            xyz = contract_to_unisphere(points.clone().detach(), torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device='cuda'))
-            dir_pp = (points - model['cam'].campos.repeat(points.shape[0], 1))
-            dir_pp = dir_pp / dir_pp.norm(dim=1, keepdim=True)
-            shs = model['mlp_head'](torch.cat([model['recolor'](xyz), model['direction_encoding'](dir_pp)], dim=-1)).unsqueeze(1)
-        else:
-            rgb_net = rgb_net.view(rgb_net.size(0), (model['max_sh_degree'] + 1) ** 2, 3)
-            feature_dc = rgb_net[:,0:1,:]
-            feature_rest = rgb_net[:,1:,:]
-            shs = torch.cat((feature_dc, feature_rest), dim=1)
-        params_net = {
+def inference_gs(model, decoder, color_decoder, points):
+    # 推理颜色
+    xyz = contract_to_unisphere(points.clone().detach(), torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device='cuda'))
+    dir_pp = (points - color_decoder['cam_center'].repeat(points.shape[0], 1))
+    dir_pp = dir_pp / dir_pp.norm(dim=1, keepdim=True)
+    shs = color_decoder['mlp_head'](torch.cat([color_decoder['recolor'](xyz), color_decoder['direction_encoding'](dir_pp)], dim=-1)).unsqueeze(1)
+    # 推理opacity scales rotation
+    feature = decoder(model(points.detach()))
+    # split the feature
+    opacity = feature[:,:1]
+    opacity = opacity*10
+    scales = feature[:,1:4]
+    scales = torch.sigmoid(scales)
+    scales = (scales-1)*5-2
+    scales = scales.mean(dim=1 , keepdim=True)
+    rotations = feature[:,4:8]
+    
+    return {
         'means3D': points,
         'shs': shs.float(),
-        'unnorm_rotations': rotations_net,
-        'logit_opacities': opacity_net,
-        'log_scales': scales_net,
-        }
-        return params_net
-    return {}
+        'unnorm_rotations': rotations,
+        'logit_opacities': opacity,
+        'log_scales': scales,
+    }
 
 @torch.no_grad()
-def inference_gs_nograd(model, points):
-    if model['enable_net']:
-        # opacity_net, scales_net, rgb_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points.detach()))
-        opacity_net, scales_net, rotations_net = model['tri_plane'].inference(model['contractor'].contracte(points.detach()))
-        scales_net = (scales_net-1)*5-2
-        scales_net = scales_net.mean(dim=1 , keepdim=True)
-        # rgb_net = F.normalize(rgb_net, dim=1)
-        if model['use_mlp_color']:
-            xyz = contract_to_unisphere(points.clone().detach(), torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device='cuda'))
-            dir_pp = (points - model['cam'].campos.repeat(points.shape[0], 1))
-            dir_pp = dir_pp / dir_pp.norm(dim=1, keepdim=True)
-            shs = model['mlp_head'](torch.cat([model['recolor'](xyz), model['direction_encoding'](dir_pp)], dim=-1)).unsqueeze(1)
-        else:
-            rgb_net = rgb_net.view(rgb_net.size(0), (model['max_sh_degree'] + 1) ** 2, 3)
-            feature_dc = rgb_net[:,0:1,:]
-            feature_rest = rgb_net[:,1:,:]
-            shs = torch.cat((feature_dc, feature_rest), dim=1)
-        params_net = {
+def inference_gs_nograd(model, decoder, color_decoder, points):
+    # 推理颜色
+    xyz = contract_to_unisphere(points.clone().detach(), torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device='cuda'))
+    dir_pp = (points - color_decoder['cam_center'].repeat(points.shape[0], 1))
+    dir_pp = dir_pp / dir_pp.norm(dim=1, keepdim=True)
+    shs = color_decoder['mlp_head'](torch.cat([color_decoder['recolor'](xyz), color_decoder['direction_encoding'](dir_pp)], dim=-1)).unsqueeze(1)
+    # 推理opacity scales rotation
+    feature = decoder(model(points.detach()))
+    # split the feature
+    opacity = feature[:,:1]
+    opacity = opacity*10
+    scales = feature[:,1:4]
+    scales = torch.sigmoid(scales)
+    scales = (scales-1)*5-2
+    scales = scales.mean(dim=1 , keepdim=True)
+    rotations = feature[:,4:8]
+    
+    return {
         'means3D': points,
         'shs': shs.float(),
-        'unnorm_rotations': rotations_net,
-        'logit_opacities': opacity_net,
-        'log_scales': scales_net,
-        }
-        return params_net
-    return {}
+        'unnorm_rotations': rotations,
+        'logit_opacities': opacity,
+        'log_scales': scales,
+    }
 def contract_to_unisphere(
         x: torch.Tensor,
         aabb: torch.Tensor,

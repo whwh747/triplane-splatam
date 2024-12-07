@@ -85,11 +85,14 @@ def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixe
                 {'id': keyframeid, 'percent_inside': percent_inside})
 
         # Sort the keyframes based on the percentage of points that are inside the image
+        # 1.根据percent_inside降序排序
         list_keyframe = sorted(
             list_keyframe, key=lambda i: i['percent_inside'], reverse=True)
         # Select the keyframes with percentage of points inside the image > 0
+        # 2.选择percent_inside>0的keyframe
         selected_keyframe_list = [keyframe_dict['id']
                                   for keyframe_dict in list_keyframe if keyframe_dict['percent_inside'] > 0.0]
+        # 3.随机打乱并选择前k个keyframe
         selected_keyframe_list = list(np.random.permutation(
             np.array(selected_keyframe_list))[:k])
 

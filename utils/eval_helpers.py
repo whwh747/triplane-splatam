@@ -18,6 +18,7 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
 from pytorch_msssim import ms_ssim
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from scripts.triplane_model import inference_gs_nograd, inference_gs
 loss_fn_alex = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).cuda()
 
 def align(model, data):
@@ -213,8 +214,8 @@ def report_progress(params, params_net, data, i, progress_bar, iter_time_idx, si
                                                    camera_grad=False)
 
         # Initialize Render Variables
-        rendervar = transformed_params2rendervar(params, params_net, transformed_gaussians)
-        depth_sil_rendervar = transformed_params2depthplussilhouette(params, params_net, data['w2c'], 
+        rendervar = transformed_params2rendervar(params_net, transformed_gaussians)
+        depth_sil_rendervar = transformed_params2depthplussilhouette(params_net, data['w2c'], 
                                                                      transformed_gaussians)
         depth_sil, _, _, = Renderer(raster_settings=data['cam'])(**depth_sil_rendervar)
         rastered_depth = depth_sil[0, :, :].unsqueeze(0)
@@ -405,7 +406,7 @@ def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
     plt.close()
 
 
-def eval(dataset, final_params, params_net, num_frames, eval_dir, sil_thres, 
+def eval(dataset, final_params, params_eval, num_frames, eval_dir, sil_thres, 
          mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False):
     print("Evaluating Final Parameters ...")
     psnr_list = []
@@ -448,16 +449,27 @@ def eval(dataset, final_params, params_net, num_frames, eval_dir, sil_thres,
             continue
 
         # Get current frame Gaussians
-        transformed_gaussians = transform_to_frame(final_params, params_net, time_idx, 
+        transformed_gaussians = transform_to_frame(final_params, params_eval, time_idx, 
                                                    gaussians_grad=False, 
                                                    camera_grad=False)
  
         # Define current frame data
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
+        # log_scales = torch.tile(final_params['log_scales'], (1, 3))
+        # rasterizer = Renderer(raster_settings=curr_data['cam'])
+        # radii_pure = rasterizer.visible_filter(
+        #     means3D = transformed_gaussians['means3D'],
+        #     scales = torch.exp(log_scales[:,:3]),
+        #     rotations = F.normalize(transformed_gaussians['unnorm_rotations']),
+        #     cov3D_precomp = None
+        # )
+        # visible_mask = radii_pure > 0
+        # visible_points = final_params['means3D'][visible_mask]
+        # shs = inference_gs_nograd(model, decoder, final_params['means3D'])
 
         # Initialize Render Variables
-        rendervar = transformed_params2rendervar(final_params, params_net, transformed_gaussians)
-        depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, params_net, curr_data['w2c'],
+        rendervar = transformed_params2rendervar(params_eval, transformed_gaussians)
+        depth_sil_rendervar = transformed_params2depthplussilhouette(params_eval, curr_data['w2c'],
                                                                      transformed_gaussians)
 
         # Render Depth & Silhouette
